@@ -45,7 +45,9 @@ defmodule Beamflow.Engine.RegistryTest do
 
       assert is_map(spec)
       assert spec[:id] == Beamflow.Engine.Registry
-      assert spec[:start] == {Registry, :start_link, [[keys: :unique, name: Beamflow.Engine.Registry]]}
+
+      assert spec[:start] ==
+               {Registry, :start_link, [[keys: :unique, name: Beamflow.Engine.Registry]]}
     end
   end
 end

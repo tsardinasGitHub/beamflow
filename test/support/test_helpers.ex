@@ -54,7 +54,7 @@ defmodule Beamflow.TestHelpers do
       assert_eventually(fn -> Process.alive?(pid) == false end, 1000)
 
   """
-  @spec assert_eventually((() -> boolean()), pos_integer()) :: :ok
+  @spec assert_eventually((-> boolean()), pos_integer()) :: :ok
   def assert_eventually(condition, timeout_ms \\ 5000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_assert_eventually(condition, deadline)
