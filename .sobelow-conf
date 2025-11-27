@@ -1,0 +1,9 @@
+[
+  verbose: false,
+  private: false,
+  skip: false,
+  router: "lib/beamflow_web/router.ex",
+  exit: "low",
+  format: "txt",
+  out: ""
+]
