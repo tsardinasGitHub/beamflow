@@ -1,4 +1,4 @@
-# live-task-orchestrator
-Demostrar cómo Elixir maneja la concurrencia masiva y la tolerancia a fallos
+# beamflow
+Manejar concurrencia masiva con tolerancia a fallos y estado distribuido.
 
 **"Work in Progress: Demostración de habilidades de arquitectura"**.
