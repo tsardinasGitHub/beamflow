@@ -65,7 +65,7 @@ defmodule BeamflowWeb.WorkflowDetailsLive do
     ~H"""
     <div class="mx-auto max-w-4xl">
       <div class="mb-6">
-        <.link navigate={~p"/dashboard"} class="text-blue-600 hover:underline">
+        <.link navigate={~p"/"} class="text-blue-600 hover:underline">
           ← Volver al Dashboard
         </.link>
       </div>
@@ -80,7 +80,18 @@ defmodule BeamflowWeb.WorkflowDetailsLive do
                 Módulo: <%= format_module(@workflow.workflow_module) %>
               </p>
             </div>
-            <.status_badge status={@workflow.status} />
+            <div class="flex items-center gap-3">
+              <.link
+                navigate={~p"/workflows/#{@workflow_id}/graph"}
+                class="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition flex items-center gap-2"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+                Ver Grafo
+              </.link>
+              <.status_badge status={@workflow.status} />
+            </div>
           </div>
 
           <!-- Progreso -->
@@ -142,7 +153,7 @@ defmodule BeamflowWeb.WorkflowDetailsLive do
       <% else %>
         <div class="p-8 text-center bg-yellow-50 rounded-lg border border-yellow-200">
           <p class="text-yellow-700">⚠️ Workflow no encontrado: <%= @workflow_id %></p>
-          <.link navigate={~p"/dashboard"} class="text-blue-600 hover:underline mt-2 inline-block">
+          <.link navigate={~p"/"} class="text-blue-600 hover:underline mt-2 inline-block">
             Volver al Dashboard
           </.link>
         </div>

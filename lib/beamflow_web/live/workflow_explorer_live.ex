@@ -367,6 +367,13 @@ defmodule BeamflowWeb.WorkflowExplorerLive do
                     >
                       👁️
                     </.link>
+                    <.link
+                      navigate={~p"/workflows/#{wf.id}/graph"}
+                      class="p-2 text-slate-400 hover:text-purple-400 hover:bg-slate-700 rounded transition"
+                      title="Ver grafo"
+                    >
+                      📊
+                    </.link>
                     <button
                       :if={wf.status == :failed}
                       phx-click="retry_workflow"

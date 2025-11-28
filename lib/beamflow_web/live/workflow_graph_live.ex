@@ -1,0 +1,616 @@
+defmodule BeamflowWeb.WorkflowGraphLive do
+  @moduledoc """
+  LiveView para visualización interactiva de workflows como grafos SVG.
+
+  Muestra el workflow como un diagrama de nodos conectados donde:
+  - Cada step es un nodo rectangular con el nombre del módulo
+  - Las conexiones muestran el flujo entre steps
+  - Los colores indican el estado de ejecución de cada step
+  - Click en un nodo muestra detalles del step
+
+  ## Estados Visuales
+
+  - **Pendiente** (gris): Step aún no ejecutado
+  - **Ejecutando** (azul pulsante): Step en ejecución actual
+  - **Completado** (verde): Step ejecutado exitosamente
+  - **Fallido** (rojo): Step que falló
+
+  ## Interactividad
+
+  - Click en nodo: Muestra panel de detalles del step
+  - Hover en nodo: Resalta conexiones
+  - Actualización en tiempo real via PubSub
+  """
+
+  use BeamflowWeb, :live_view
+
+  alias Beamflow.Storage.WorkflowStore
+  alias Beamflow.Engine.WorkflowActor
+  alias Beamflow.Workflows.Graph
+
+  # Configuración del layout
+  @node_width 200
+  @node_height 60
+  @node_spacing_x 280
+  # @node_spacing_y 100 # Reservado para layout vertical futuro
+  @padding 40
+
+  @impl true
+  def mount(%{"id" => id}, _session, socket) do
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Beamflow.PubSub, "workflow:#{id}")
+    end
+
+    socket =
+      socket
+      |> assign(
+        page_title: "Grafo: #{id}",
+        workflow_id: id,
+        selected_node: nil,
+        show_details: false
+      )
+      |> load_workflow(id)
+      |> build_graph_data()
+
+    {:ok, socket}
+  end
+
+  @impl true
+  def handle_info({:workflow_updated, data}, socket) do
+    socket =
+      socket
+      |> assign(:workflow, data)
+      |> build_graph_data()
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("select_node", %{"node-id" => node_id}, socket) do
+    node = Enum.find(socket.assigns.nodes, &(&1.id == node_id))
+
+    socket =
+      socket
+      |> assign(selected_node: node, show_details: true)
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("close_details", _params, socket) do
+    {:noreply, assign(socket, show_details: false)}
+  end
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <div class="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
+      <!-- Header -->
+      <div class="p-6 border-b border-white/10">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <.link
+              navigate={~p"/workflows/#{@workflow_id}"}
+              class="text-purple-400 hover:text-purple-300 transition-colors"
+            >
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+              </svg>
+            </.link>
+            <div>
+              <h1 class="text-2xl font-bold text-white">Grafo del Workflow</h1>
+              <p class="text-slate-400 text-sm mt-1">
+                <%= @workflow_id %>
+                <%= if @workflow do %>
+                  • <%= format_module(@workflow.workflow_module) %>
+                <% end %>
+              </p>
+            </div>
+          </div>
+
+          <%= if @workflow do %>
+            <.workflow_status_badge status={@workflow.status} />
+          <% end %>
+        </div>
+      </div>
+
+      <!-- Graph Container -->
+      <div class="p-6 flex gap-6">
+        <!-- SVG Graph -->
+        <div class="flex-1 bg-slate-800/50 backdrop-blur-sm rounded-2xl border border-white/10 overflow-hidden">
+          <%= if @workflow do %>
+            <svg
+              viewBox={"0 0 #{@svg_width} #{@svg_height}"}
+              class="w-full h-auto min-h-[500px]"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <!-- Definitions for gradients and filters -->
+              <defs>
+                <!-- Glow filter for active node -->
+                <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+                  <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+                  <feMerge>
+                    <feMergeNode in="coloredBlur"/>
+                    <feMergeNode in="SourceGraphic"/>
+                  </feMerge>
+                </filter>
+
+                <!-- Arrow marker -->
+                <marker
+                  id="arrowhead"
+                  markerWidth="10"
+                  markerHeight="7"
+                  refX="9"
+                  refY="3.5"
+                  orient="auto"
+                >
+                  <polygon
+                    points="0 0, 10 3.5, 0 7"
+                    fill="#8b5cf6"
+                  />
+                </marker>
+
+                <!-- Gradients for node states -->
+                <linearGradient id="gradient-pending" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" style="stop-color:#475569"/>
+                  <stop offset="100%" style="stop-color:#334155"/>
+                </linearGradient>
+
+                <linearGradient id="gradient-running" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" style="stop-color:#3b82f6"/>
+                  <stop offset="100%" style="stop-color:#2563eb"/>
+                </linearGradient>
+
+                <linearGradient id="gradient-completed" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" style="stop-color:#22c55e"/>
+                  <stop offset="100%" style="stop-color:#16a34a"/>
+                </linearGradient>
+
+                <linearGradient id="gradient-failed" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" style="stop-color:#ef4444"/>
+                  <stop offset="100%" style="stop-color:#dc2626"/>
+                </linearGradient>
+              </defs>
+
+              <!-- Connection lines -->
+              <%= for edge <- @edges do %>
+                <path
+                  d={edge.path}
+                  fill="none"
+                  stroke="#8b5cf6"
+                  stroke-width="2"
+                  stroke-dasharray={if edge.pending, do: "5,5", else: "none"}
+                  marker-end="url(#arrowhead)"
+                  class="transition-all duration-300"
+                />
+              <% end %>
+
+              <!-- Nodes -->
+              <%= for node <- @nodes do %>
+                <g
+                  class="cursor-pointer group"
+                  phx-click="select_node"
+                  phx-value-node-id={node.id}
+                >
+                  <!-- Node background -->
+                  <rect
+                    x={node.x}
+                    y={node.y}
+                    width={@node_width}
+                    height={@node_height}
+                    rx="12"
+                    ry="12"
+                    fill={"url(#gradient-#{node.state})"}
+                    stroke={node_stroke_color(node.state)}
+                    stroke-width={if node.state == :running, do: "3", else: "2"}
+                    filter={if node.state == :running, do: "url(#glow)", else: "none"}
+                    class={"transition-all duration-300 #{if node.state == :running, do: "animate-pulse", else: ""}"}
+                  />
+
+                  <!-- Step icon -->
+                  <text
+                    x={node.x + 16}
+                    y={node.y + 25}
+                    fill="white"
+                    font-size="18"
+                    class="select-none"
+                  >
+                    <%= node_icon(node.state) %>
+                  </text>
+
+                  <!-- Step number -->
+                  <text
+                    x={node.x + 16}
+                    y={node.y + 48}
+                    fill="white"
+                    font-size="12"
+                    opacity="0.7"
+                    class="select-none"
+                  >
+                    Step <%= node.index + 1 %>
+                  </text>
+
+                  <!-- Step name -->
+                  <text
+                    x={node.x + 45}
+                    y={node.y + 36}
+                    fill="white"
+                    font-size="14"
+                    font-weight="500"
+                    class="select-none"
+                  >
+                    <%= truncate_name(node.label, 18) %>
+                  </text>
+
+                  <!-- Hover effect overlay -->
+                  <rect
+                    x={node.x}
+                    y={node.y}
+                    width={@node_width}
+                    height={@node_height}
+                    rx="12"
+                    ry="12"
+                    fill="white"
+                    opacity="0"
+                    class="group-hover:opacity-10 transition-opacity duration-200"
+                  />
+                </g>
+              <% end %>
+            </svg>
+          <% else %>
+            <div class="flex items-center justify-center h-96">
+              <p class="text-slate-400">Workflow no encontrado</p>
+            </div>
+          <% end %>
+        </div>
+
+        <!-- Details Panel -->
+        <%= if @show_details and @selected_node do %>
+          <div class="w-80 bg-slate-800/50 backdrop-blur-sm rounded-2xl border border-white/10 p-6">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-lg font-semibold text-white">Detalles del Step</h3>
+              <button
+                phx-click="close_details"
+                class="text-slate-400 hover:text-white transition-colors"
+              >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <div class="space-y-4">
+              <div>
+                <label class="text-xs text-slate-400 uppercase tracking-wider">Nombre</label>
+                <p class="text-white font-medium mt-1"><%= @selected_node.label %></p>
+              </div>
+
+              <div>
+                <label class="text-xs text-slate-400 uppercase tracking-wider">Módulo</label>
+                <p class="text-slate-300 text-sm mt-1 font-mono break-all">
+                  <%= @selected_node.module %>
+                </p>
+              </div>
+
+              <div>
+                <label class="text-xs text-slate-400 uppercase tracking-wider">Estado</label>
+                <div class="mt-2">
+                  <.node_state_badge state={@selected_node.state} />
+                </div>
+              </div>
+
+              <div>
+                <label class="text-xs text-slate-400 uppercase tracking-wider">Posición</label>
+                <p class="text-slate-300 text-sm mt-1">
+                  Step <%= @selected_node.index + 1 %> de <%= length(@nodes) %>
+                </p>
+              </div>
+
+              <%= if @selected_node.state == :running do %>
+                <div class="p-3 bg-blue-500/20 rounded-lg border border-blue-500/30">
+                  <div class="flex items-center gap-2 text-blue-300">
+                    <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span class="text-sm">Ejecutando...</span>
+                  </div>
+                </div>
+              <% end %>
+
+              <%= if @selected_node.state == :failed and @workflow.error do %>
+                <div class="p-3 bg-red-500/20 rounded-lg border border-red-500/30">
+                  <label class="text-xs text-red-300 uppercase tracking-wider">Error</label>
+                  <p class="text-red-200 text-sm mt-1 font-mono">
+                    <%= inspect(@workflow.error) %>
+                  </p>
+                </div>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+      </div>
+
+      <!-- Legend -->
+      <div class="px-6 pb-6">
+        <div class="bg-slate-800/30 backdrop-blur-sm rounded-xl border border-white/10 p-4">
+          <div class="flex items-center gap-8 justify-center">
+            <div class="flex items-center gap-2">
+              <div class="w-4 h-4 rounded bg-gradient-to-b from-slate-500 to-slate-600"></div>
+              <span class="text-slate-400 text-sm">Pendiente</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="w-4 h-4 rounded bg-gradient-to-b from-blue-500 to-blue-600 animate-pulse"></div>
+              <span class="text-slate-400 text-sm">Ejecutando</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="w-4 h-4 rounded bg-gradient-to-b from-green-500 to-green-600"></div>
+              <span class="text-slate-400 text-sm">Completado</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <div class="w-4 h-4 rounded bg-gradient-to-b from-red-500 to-red-600"></div>
+              <span class="text-slate-400 text-sm">Fallido</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  # ============================================================================
+  # Componentes
+  # ============================================================================
+
+  attr :status, :atom, required: true
+
+  defp workflow_status_badge(assigns) do
+    {text, class} =
+      case assigns.status do
+        :pending -> {"Pendiente", "bg-yellow-500/20 text-yellow-300 border-yellow-500/30"}
+        :running -> {"Ejecutando", "bg-blue-500/20 text-blue-300 border-blue-500/30"}
+        :completed -> {"Completado", "bg-green-500/20 text-green-300 border-green-500/30"}
+        :failed -> {"Fallido", "bg-red-500/20 text-red-300 border-red-500/30"}
+        _ -> {"Desconocido", "bg-slate-500/20 text-slate-300 border-slate-500/30"}
+      end
+
+    assigns = assign(assigns, text: text, class: class)
+
+    ~H"""
+    <span class={"px-4 py-2 rounded-full text-sm font-medium border #{@class}"}>
+      <%= @text %>
+    </span>
+    """
+  end
+
+  attr :state, :atom, required: true
+
+  defp node_state_badge(assigns) do
+    {text, class} =
+      case assigns.state do
+        :pending -> {"⏳ Pendiente", "bg-slate-500/20 text-slate-300"}
+        :running -> {"🔄 Ejecutando", "bg-blue-500/20 text-blue-300"}
+        :completed -> {"✅ Completado", "bg-green-500/20 text-green-300"}
+        :failed -> {"❌ Fallido", "bg-red-500/20 text-red-300"}
+        _ -> {"❓ Desconocido", "bg-slate-500/20 text-slate-300"}
+      end
+
+    assigns = assign(assigns, text: text, class: class)
+
+    ~H"""
+    <span class={"px-3 py-1.5 rounded-lg text-sm #{@class}"}>
+      <%= @text %>
+    </span>
+    """
+  end
+
+  # ============================================================================
+  # Funciones Privadas
+  # ============================================================================
+
+  defp load_workflow(socket, id) do
+    workflow =
+      case WorkflowActor.get_state(id) do
+        {:ok, state} -> state
+        {:error, :not_found} ->
+          case WorkflowStore.get_workflow(id) do
+            {:ok, record} -> record
+            {:error, _} -> nil
+          end
+      end
+
+    assign(socket, :workflow, workflow)
+  end
+
+  defp build_graph_data(socket) do
+    case socket.assigns.workflow do
+      nil ->
+        assign(socket, nodes: [], edges: [], svg_width: 400, svg_height: 200)
+
+      workflow ->
+        # Obtener el grafo del workflow
+        graph = get_workflow_graph(workflow.workflow_module)
+
+        # Construir nodos con posiciones
+        nodes = build_nodes(graph, workflow)
+
+        # Construir edges
+        edges = build_edges(graph, nodes)
+
+        # Calcular dimensiones del SVG
+        {svg_width, svg_height} = calculate_svg_dimensions(nodes)
+
+        assign(socket,
+          nodes: nodes,
+          edges: edges,
+          svg_width: svg_width,
+          svg_height: svg_height,
+          node_width: @node_width,
+          node_height: @node_height
+        )
+    end
+  end
+
+  defp get_workflow_graph(workflow_module) do
+    if function_exported?(workflow_module, :graph, 0) do
+      workflow_module.graph()
+    else
+      # Fallback: construir grafo desde steps()
+      steps = workflow_module.steps()
+      Graph.from_linear_steps(steps)
+    end
+  end
+
+  defp build_nodes(graph, workflow) do
+    current_step = workflow.current_step_index || 0
+    status = workflow.status
+
+    graph.nodes
+    |> Map.values()
+    |> Enum.filter(&(&1.type == :step))
+    |> Enum.sort_by(& &1.id)
+    |> Enum.with_index()
+    |> Enum.map(fn {node, index} ->
+      state = calculate_node_state(index, current_step, status)
+
+      # Calcular posición (layout horizontal)
+      x = @padding + index * @node_spacing_x
+      y = @padding
+
+      %{
+        id: node.id,
+        index: index,
+        label: format_step_label(node.module),
+        module: format_module_full(node.module),
+        state: state,
+        x: x,
+        y: y
+      }
+    end)
+  end
+
+  defp calculate_node_state(index, current_step, workflow_status) do
+    cond do
+      # Workflow completado: todos los steps están completos
+      workflow_status == :completed -> :completed
+
+      # Workflow fallido: el step actual es el que falló
+      workflow_status == :failed and index == current_step -> :failed
+      workflow_status == :failed and index < current_step -> :completed
+      workflow_status == :failed and index > current_step -> :pending
+
+      # Workflow running: el step actual está ejecutando
+      workflow_status == :running and index == current_step -> :running
+      workflow_status == :running and index < current_step -> :completed
+      workflow_status == :running and index > current_step -> :pending
+
+      # Workflow pending o cualquier otro estado
+      index < current_step -> :completed
+      index == current_step -> :pending
+      true -> :pending
+    end
+  end
+
+  defp build_edges(graph, nodes) do
+    graph.edges
+    |> Enum.flat_map(fn {from_id, targets} ->
+      from_node = Enum.find(nodes, &(&1.id == from_id))
+
+      targets
+      |> Enum.map(fn
+        {target_id, _condition} -> target_id
+        target_id when is_binary(target_id) -> target_id
+      end)
+      |> Enum.map(fn target_id ->
+        to_node = Enum.find(nodes, &(&1.id == target_id))
+
+        if from_node && to_node do
+          %{
+            from: from_id,
+            to: target_id,
+            path: calculate_edge_path(from_node, to_node),
+            pending: from_node.state == :pending and to_node.state == :pending
+          }
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
+    end)
+  end
+
+  defp calculate_edge_path(from_node, to_node) do
+    # Punto de salida: centro-derecha del nodo origen
+    x1 = from_node.x + @node_width
+    y1 = from_node.y + @node_height / 2
+
+    # Punto de entrada: centro-izquierda del nodo destino
+    x2 = to_node.x
+    y2 = to_node.y + @node_height / 2
+
+    # Si están en línea horizontal, dibujar línea recta
+    if y1 == y2 do
+      "M #{x1} #{y1} L #{x2} #{y2}"
+    else
+      # Curva bezier para conexiones no lineales
+      cx1 = x1 + 40
+      cx2 = x2 - 40
+      "M #{x1} #{y1} C #{cx1} #{y1}, #{cx2} #{y2}, #{x2} #{y2}"
+    end
+  end
+
+  defp calculate_svg_dimensions(nodes) do
+    if nodes == [] do
+      {400, 200}
+    else
+      max_x = nodes |> Enum.map(& &1.x) |> Enum.max()
+      max_y = nodes |> Enum.map(& &1.y) |> Enum.max()
+
+      width = max_x + @node_width + @padding * 2
+      height = max_y + @node_height + @padding * 2
+
+      {width, max(height, 200)}
+    end
+  end
+
+  defp format_step_label(module) when is_atom(module) do
+    module
+    |> Module.split()
+    |> List.last()
+  end
+
+  defp format_step_label(_), do: "Step"
+
+  defp format_module_full(module) when is_atom(module) do
+    module |> Module.split() |> Enum.join(".")
+  end
+
+  defp format_module_full(_), do: "Unknown"
+
+  defp format_module(module) when is_atom(module) do
+    module
+    |> Module.split()
+    |> Enum.take(-2)
+    |> Enum.join(".")
+  end
+
+  defp format_module(_), do: "Unknown"
+
+  defp truncate_name(name, max_length) do
+    if String.length(name) > max_length do
+      String.slice(name, 0, max_length - 2) <> "…"
+    else
+      name
+    end
+  end
+
+  defp node_stroke_color(:pending), do: "#64748b"
+  defp node_stroke_color(:running), do: "#60a5fa"
+  defp node_stroke_color(:completed), do: "#4ade80"
+  defp node_stroke_color(:failed), do: "#f87171"
+  defp node_stroke_color(_), do: "#64748b"
+
+  defp node_icon(:pending), do: "⏳"
+  defp node_icon(:running), do: "🔄"
+  defp node_icon(:completed), do: "✅"
+  defp node_icon(:failed), do: "❌"
+  defp node_icon(_), do: "📦"
+end

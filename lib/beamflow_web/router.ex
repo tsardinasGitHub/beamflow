@@ -17,24 +17,19 @@ defmodule BeamflowWeb.Router do
   scope "/", BeamflowWeb do
     pipe_through :browser
 
-    # Página principal redirige al dashboard ejecutivo
-    get "/", PageController, :home
-
-    # Dashboard Ejecutivo - Vista principal con KPIs
-    live "/dashboard", DashboardLive
+    # Dashboard Ejecutivo como página principal
+    live "/", DashboardLive
 
     # Explorador de Workflows - Con filtros y streams
     live "/workflows", WorkflowExplorerLive
     live "/workflows/:id", WorkflowDetailsLive
+    live "/workflows/:id/graph", WorkflowGraphLive
 
     # Panel de Resiliencia - Circuit Breakers, DLQ, Sagas
     live "/resilience", ResilienceLive
 
     # Centro de Control de Chaos Engineering
     live "/chaos", ChaosLive
-
-    # Legacy: mantener compatibilidad con dashboard antiguo
-    live "/dashboard/legacy", WorkflowDashboardLive
   end
 
   # Other scopes may use custom stacks.
