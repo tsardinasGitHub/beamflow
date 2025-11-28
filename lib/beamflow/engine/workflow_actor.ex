@@ -58,6 +58,7 @@ defmodule Beamflow.Engine.WorkflowActor do
 
   alias Beamflow.Engine.Idempotency
   alias Beamflow.Engine.Registry, as: WorkflowRegistry
+  alias Beamflow.Engine.Retry
   alias Beamflow.Storage.WorkflowStore
   alias Beamflow.Workflows.{Builder, Graph}
 
@@ -436,58 +437,111 @@ defmodule Beamflow.Engine.WorkflowActor do
   # ════════════════════════════════════════════════════════════════════════════
   # Ejecuta el step inyectando la idempotency_key en el estado.
   # Los steps con side-effects pueden usar esta key para llamadas externas.
+  # Si el step tiene política de retry, se ejecuta con backoff automático.
   # ════════════════════════════════════════════════════════════════════════════
-  defp do_execute_step(step_module, workflow_module, state, idempotency_key, start_time) do
+  defp do_execute_step(step_module, workflow_module, state, _idempotency_key, start_time) do
     %{workflow_state: workflow_state, workflow_id: workflow_id, executed_nodes: executed_nodes} = state
     step_index = length(executed_nodes)
     step_name = inspect(step_module)
 
-    # Inyectar idempotency_key en el estado del workflow
-    # Los steps pueden usarla para llamadas a servicios externos
-    enriched_state = Map.put(workflow_state, :idempotency_key, idempotency_key)
+    # Verificar si el step tiene política de retry definida
+    retry_policy = get_step_retry_policy(step_module)
 
-    case step_module.execute(enriched_state) do
-      {:ok, updated_workflow_state} ->
+    result =
+      if retry_policy do
+        # Ejecutar con retry automático
+        execute_with_retry(step_module, workflow_state, workflow_id, retry_policy, step_name)
+      else
+        # Ejecución directa sin retry (fail-fast)
+        execute_direct(step_module, workflow_state, workflow_id)
+      end
+
+    case result do
+      {:ok, updated_workflow_state, retry_info} ->
         duration_ms = System.monotonic_time(:millisecond) - start_time
-        Logger.debug("Workflow #{workflow_id}: Step #{step_name} succeeded in #{duration_ms}ms")
+        attempts = retry_info[:attempt] || 1
 
-        # ════════════════════════════════════════════════════════════════════════
-        # IDEMPOTENCIA CENTRALIZADA - FASE 3: AFTER EXECUTE (SUCCESS)
-        # ════════════════════════════════════════════════════════════════════════
-        # Marcar como completado DESPUÉS del side-effect pero ANTES de persistir.
-        # Si crash aquí, el step se considera completado y no se re-ejecuta.
-        # ════════════════════════════════════════════════════════════════════════
-        Idempotency.complete_step(idempotency_key, updated_workflow_state)
+        if attempts > 1 do
+          Logger.info("Workflow #{workflow_id}: Step #{step_name} succeeded after #{attempts} attempts in #{duration_ms}ms")
+        else
+          Logger.debug("Workflow #{workflow_id}: Step #{step_name} succeeded in #{duration_ms}ms")
+        end
 
         record_event(workflow_id, :step_completed, %{
           step: step_name,
           step_index: step_index,
           duration_ms: duration_ms,
-          idempotency_key: idempotency_key
+          attempts: attempts,
+          idempotency_key: retry_info[:idempotency_key]
         })
 
         advance_to_next_step(step_module, workflow_module, state, updated_workflow_state)
 
-      {:error, reason} ->
+      {:error, reason, retry_info} ->
         duration_ms = System.monotonic_time(:millisecond) - start_time
-        Logger.error("Workflow #{workflow_id}: Step #{step_name} failed in #{duration_ms}ms - #{inspect(reason)}")
+        attempts = retry_info[:attempt] || 1
 
-        # ════════════════════════════════════════════════════════════════════════
-        # IDEMPOTENCIA CENTRALIZADA - FASE 3: AFTER EXECUTE (FAILURE)
-        # ════════════════════════════════════════════════════════════════════════
-        # Marcar como fallido permite retries con nueva key de intento.
-        # ════════════════════════════════════════════════════════════════════════
-        Idempotency.fail_step(idempotency_key, reason)
+        Logger.error("Workflow #{workflow_id}: Step #{step_name} failed after #{attempts} attempt(s) in #{duration_ms}ms - #{inspect(reason)}")
 
         record_event(workflow_id, :step_failed, %{
           step: step_name,
           step_index: step_index,
           duration_ms: duration_ms,
           error: inspect(reason),
-          idempotency_key: idempotency_key
+          attempts: attempts,
+          retry_errors: retry_info[:errors] || [reason]
         })
 
         handle_step_error(step_module, reason, workflow_module, state)
+    end
+  end
+
+  # Obtiene la política de retry del step (si está definida)
+  defp get_step_retry_policy(step_module) do
+    if function_exported?(step_module, :__retry_policy__, 0) do
+      step_module.__retry_policy__()
+    else
+      nil
+    end
+  end
+
+  # Ejecución con retry automático
+  defp execute_with_retry(step_module, workflow_state, workflow_id, policy, step_name) do
+    on_retry = fn attempt, delay, error ->
+      record_event(workflow_id, :step_retry, %{
+        step: step_name,
+        attempt: attempt,
+        delay_ms: delay,
+        error: inspect(error)
+      })
+    end
+
+    case Retry.execute_with_retry(step_module, workflow_state, workflow_id, policy, on_retry: on_retry) do
+      {:ok, updated_state, retry_state} ->
+        {:ok, updated_state, to_map(retry_state)}
+
+      {:error, reason, retry_state} ->
+        {:error, reason, to_map(retry_state)}
+    end
+  end
+
+  # Convierte struct a map si es necesario
+  defp to_map(%{__struct__: _} = struct), do: Map.from_struct(struct)
+  defp to_map(map) when is_map(map), do: map
+
+  # Ejecución directa sin retry (fail-fast)
+  defp execute_direct(step_module, workflow_state, workflow_id) do
+    idempotency_key = Idempotency.generate_key(workflow_id, step_module, 1)
+    enriched_state = Map.put(workflow_state, :idempotency_key, idempotency_key)
+
+    case step_module.execute(enriched_state) do
+      {:ok, updated_workflow_state} ->
+        Idempotency.complete_step(idempotency_key, updated_workflow_state)
+        {:ok, updated_workflow_state, %{attempt: 1, idempotency_key: idempotency_key}}
+
+      {:error, reason} ->
+        Idempotency.fail_step(idempotency_key, reason)
+        {:error, reason, %{attempt: 1, errors: [reason], idempotency_key: idempotency_key}}
     end
   end
 

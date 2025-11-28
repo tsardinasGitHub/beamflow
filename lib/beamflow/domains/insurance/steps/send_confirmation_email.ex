@@ -6,6 +6,16 @@ defmodule Beamflow.Domains.Insurance.Steps.SendConfirmationEmail do
   - **Aprobado**: Email de bienvenida con número de póliza
   - **Rechazado**: Email de notificación con razón del rechazo
 
+  ## Retry Automático con Backoff
+
+  Este step usa la política de retry `:email` que proporciona:
+  - 5 intentos máximos
+  - Backoff exponencial: 2s → 4s → 8s → 16s → 32s (max 60s)
+  - Errores retryables: timeout, service_unavailable, smtp_error, etc.
+
+  Si el servicio de email está caído temporalmente, el step reintentará
+  automáticamente sin intervención manual.
+
   ## Idempotencia Transparente (Centralizada)
 
   Este step **NO necesita manejar idempotencia manualmente**. El `WorkflowActor`
@@ -44,6 +54,7 @@ defmodule Beamflow.Domains.Insurance.Steps.SendConfirmationEmail do
   """
 
   @behaviour Beamflow.Workflows.Step
+  use Beamflow.Engine.Retry, policy: :email
 
   require Logger
 
