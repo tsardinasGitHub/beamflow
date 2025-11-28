@@ -344,6 +344,113 @@ defmodule Beamflow.Workflows.GraphTest do
   end
 
   # ============================================================================
+  # Tests para dispatch_branch
+  # ============================================================================
+
+  describe "dispatch_branch/3" do
+    test "crea múltiples edges desde un lookup table" do
+      graph =
+        Graph.new()
+        |> Graph.add_step("start", StartStep)
+        |> Graph.add_branch("state_router", fn state -> Map.get(state, :state_code) end)
+        |> Graph.add_step("california", StepA)
+        |> Graph.add_step("texas", StepA)
+        |> Graph.add_step("default_state", StepA)
+        |> Graph.set_start("start")
+        |> Graph.connect("start", "state_router")
+        |> Graph.dispatch_branch("state_router", %{
+          "CA" => "california",
+          "TX" => "texas",
+          :default => "default_state"
+        })
+
+      # Verifica que se crearon los edges
+      edges = Map.get(graph.edges, "state_router", [])
+      assert length(edges) == 3
+
+      # Verifica que el nodo está marcado como dispatch
+      node = Map.get(graph.nodes, "state_router")
+      assert node.dispatch == true
+    end
+
+    test "lanza error si falta :default" do
+      graph =
+        Graph.new()
+        |> Graph.add_branch("router", fn s -> s.code end)
+
+      assert_raise ArgumentError, ~r/requires a :default key/, fn ->
+        Graph.dispatch_branch(graph, "router", %{
+          "A" => "path_a",
+          "B" => "path_b"
+        })
+      end
+    end
+
+    test "lanza error si solo tiene :default" do
+      graph =
+        Graph.new()
+        |> Graph.add_branch("router", fn s -> s.code end)
+
+      assert_raise ArgumentError, ~r/at least one route besides :default/, fn ->
+        Graph.dispatch_branch(graph, "router", %{
+          :default => "fallback"
+        })
+      end
+    end
+
+    test "dispatch_branch bypasses complexity check" do
+      # 10 estados + default = 11 opciones, normalmente sería error
+      graph =
+        Graph.new()
+        |> Graph.add_step("start", StartStep)
+        |> Graph.add_branch("state_router", fn state -> state.state end)
+        |> Graph.add_step("s1", StepA)
+        |> Graph.add_step("s2", StepA)
+        |> Graph.add_step("s3", StepA)
+        |> Graph.add_step("s4", StepA)
+        |> Graph.add_step("s5", StepA)
+        |> Graph.add_step("s6", StepA)
+        |> Graph.add_step("s7", StepA)
+        |> Graph.add_step("s8", StepA)
+        |> Graph.add_step("s9", StepA)
+        |> Graph.add_step("s10", StepA)
+        |> Graph.add_step("default_state", StepA)
+        |> Graph.set_start("start")
+        |> Graph.connect("start", "state_router")
+        |> Graph.dispatch_branch("state_router", %{
+          :s1 => "s1", :s2 => "s2", :s3 => "s3", :s4 => "s4", :s5 => "s5",
+          :s6 => "s6", :s7 => "s7", :s8 => "s8", :s9 => "s9", :s10 => "s10",
+          :default => "default_state"
+        })
+
+      # No debería dar error de complejidad porque es dispatch
+      {:ok, issues} = Graph.validate(graph)
+      refute Enum.any?(issues, &(&1.code in [:complex_branch, :branch_missing_default]))
+    end
+
+    test "next_nodes funciona con dispatch_branch" do
+      graph =
+        Graph.new()
+        |> Graph.add_branch("router", fn state -> state.code end)
+        |> Graph.add_step("path_a", StepA)
+        |> Graph.add_step("path_b", StepA)
+        |> Graph.add_step("fallback", StepA)
+        |> Graph.dispatch_branch("router", %{
+          :a => "path_a",
+          :b => "path_b",
+          :default => "fallback"
+        })
+
+      # Match exacto
+      assert {:ok, ["path_a"]} = Graph.next_nodes(graph, "router", %{code: :a})
+      assert {:ok, ["path_b"]} = Graph.next_nodes(graph, "router", %{code: :b})
+
+      # Default cuando no hay match
+      assert {:ok, ["fallback"]} = Graph.next_nodes(graph, "router", %{code: :unknown})
+    end
+  end
+
+  # ============================================================================
   # Helpers
   # ============================================================================
 

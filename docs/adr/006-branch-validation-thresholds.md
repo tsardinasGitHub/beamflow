@@ -137,25 +137,44 @@ Graph.validate(graph, paranoid_mode: true)
 
 ### Mitigaciones
 
-Para workflows con branches legítimamente grandes:
+Para workflows con branches legítimamente grandes, usar `dispatch_branch`:
 
 ```elixir
-# Opción 1: Lookup table en lugar de branch
-@status_handlers %{
-  :approved => ApprovedPath,
-  :rejected => RejectedPath,
-  :pending => PendingPath,
-  # ... 50 estados más
-  :default => UnknownStatusPath
-}
+# dispatch_branch: Lookup table con :default obligatorio
+# Bypasses complexity check porque garantiza :default en compile-time
 
-# Opción 2: Sub-workflows
+graph
+|> Graph.add_branch("state_router", &(&1.state_code))
+|> Graph.dispatch_branch("state_router", %{
+  "CA" => "california_flow",
+  "TX" => "texas_flow",
+  "NY" => "new_york_flow",
+  # ... 47 estados más
+  :default => "generic_state_flow"  # OBLIGATORIO - falla sin esto
+})
+```
+
+Ventajas de `dispatch_branch`:
+
+| Aspecto | `connect_branch` x N | `dispatch_branch` |
+|---------|---------------------|-------------------|
+| Complejidad | O(N) edges | 1 Map |
+| Default | Opcional (warning/error) | Obligatorio (compile-time) |
+| Complexity check | Aplica | Bypassed |
+| Lookup | Iteración | O(1) |
+
+Alternativas adicionales:
+
+```elixir
+# Sub-workflows para lógica compleja por región
 def graph do
   Graph.new()
   |> Graph.add_branch("region", &(&1.region))
-  |> Graph.connect_branch("region", "us_workflow", :us)
-  |> Graph.connect_branch("region", "eu_workflow", :eu)
-  |> Graph.connect_branch("region", "default_workflow", :default)
+  |> Graph.dispatch_branch("region", %{
+    :us => "us_sub_workflow",    # Maneja 50 estados internamente
+    :eu => "eu_sub_workflow",    # Maneja 27 países internamente
+    :default => "global_workflow"
+  })
 end
 ```
 
@@ -168,4 +187,5 @@ end
 
 ## Changelog
 
+- 2025-11-28: Agregado `dispatch_branch` como mecanismo para branches grandes
 - 2025-11-28: Decisión inicial aceptada

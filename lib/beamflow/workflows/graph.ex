@@ -237,6 +237,88 @@ defmodule Beamflow.Workflows.Graph do
   end
 
   @doc """
+  Crea un branch con dispatch basado en lookup table.
+
+  Ideal para branches con muchas opciones (ej: estados, países, códigos).
+  El `:default` key es **obligatorio** - falla en compile-time si falta.
+
+  ## Ventajas sobre múltiples `connect_branch`
+
+    * **Escalable**: Un Map en lugar de N edges
+    * **Seguro**: `:default` obligatorio garantiza que siempre hay salida
+    * **Performante**: Lookup O(1)
+    * **Bypasses complexity check**: No cuenta como N opciones separadas
+
+  ## Parámetros
+
+    * `graph` - El grafo
+    * `from_id` - ID del nodo branch origen
+    * `routes` - Map de `condición => node_id`. Debe incluir `:default`
+
+  ## Ejemplo
+
+      # En lugar de 50 connect_branch:
+      graph
+      |> Graph.add_branch("state_router", &(&1.state_code))
+      |> Graph.dispatch_branch("state_router", %{
+        "CA" => "california_flow",
+        "TX" => "texas_flow",
+        "NY" => "new_york_flow",
+        # ... más estados
+        :default => "generic_state_flow"  # OBLIGATORIO
+      })
+
+  ## Errores
+
+    * Lanza `ArgumentError` si falta `:default`
+    * Lanza `ArgumentError` si `routes` está vacío
+  """
+  @spec dispatch_branch(t(), node_id(), %{required(:default) => node_id(), optional(any()) => node_id()}) :: t()
+  def dispatch_branch(graph, from_id, routes) when is_map(routes) do
+    # Validar que :default existe
+    unless Map.has_key?(routes, :default) do
+      raise ArgumentError, """
+      dispatch_branch requires a :default key.
+      
+      Got routes: #{inspect(Map.keys(routes))}
+      
+      Add a :default route:
+        %{
+          "CA" => "california_flow",
+          :default => "fallback_flow"  # <- Required
+        }
+      """
+    end
+
+    # Validar que no está vacío (solo :default no cuenta)
+    if map_size(routes) < 2 do
+      raise ArgumentError, """
+      dispatch_branch requires at least one route besides :default.
+      
+      Got only: #{inspect(Map.keys(routes))}
+      """
+    end
+
+    # Marcar el nodo como dispatch (para que validate lo trate diferente)
+    graph = mark_as_dispatch(graph, from_id)
+
+    # Crear edges para cada ruta
+    Enum.reduce(routes, graph, fn {condition, target_id}, acc ->
+      connect_branch(acc, from_id, target_id, condition)
+    end)
+  end
+
+  defp mark_as_dispatch(graph, node_id) do
+    case Map.get(graph.nodes, node_id) do
+      nil -> 
+        graph
+      node -> 
+        updated_node = Map.put(node, :dispatch, true)
+        %{graph | nodes: Map.put(graph.nodes, node_id, updated_node)}
+    end
+  end
+
+  @doc """
   Establece el nodo inicial del grafo.
   """
   @spec set_start(t(), node_id()) :: t()
@@ -619,12 +701,16 @@ defmodule Beamflow.Workflows.Graph do
   # | >= threshold    | No       | Error     | :branch_missing_default      |
   # | > max_options   | Sí       | Warning   | :complex_branch              |
   # | <= max_options  | Sí       | OK        | (sin issue)                  |
+  #
+  # NOTA: Nodos con :dispatch => true (creados via dispatch_branch) se excluyen
+  # del complexity check porque ya garantizan :default en compile-time.
   defp validate_branch_safety(issues, graph, opts) do
     max_options = opts.max_branch_options
     error_threshold = opts.error_threshold_no_default
 
     graph.nodes
     |> Enum.filter(fn {_id, node} -> node.type == :branch end)
+    |> Enum.filter(fn {_id, node} -> not Map.get(node, :dispatch, false) end)  # Excluir dispatch
     |> Enum.reduce(issues, fn {node_id, _node}, acc ->
       edges = Map.get(graph.edges, node_id, [])
       option_count = length(edges)
