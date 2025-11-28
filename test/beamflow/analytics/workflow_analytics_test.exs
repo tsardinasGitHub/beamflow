@@ -504,6 +504,44 @@ defmodule Beamflow.Analytics.WorkflowAnalyticsTest do
   end
 
   # ============================================================================
+  # Tests de Adaptive Sparklines
+  # ============================================================================
+
+  describe "adaptive_sparklines/2" do
+    test "retorna mapa con completed, failed, total" do
+      result = WorkflowAnalytics.adaptive_sparklines(6, :hour)
+
+      assert is_map(result)
+      assert Map.has_key?(result, :completed)
+      assert Map.has_key?(result, :failed)
+      assert Map.has_key?(result, :total)
+    end
+
+    test "cada lista tiene N elementos según count" do
+      result = WorkflowAnalytics.adaptive_sparklines(8, :hour)
+
+      assert length(result.completed) == 8
+      assert length(result.failed) == 8
+      assert length(result.total) == 8
+    end
+
+    test "funciona con unit :day" do
+      result = WorkflowAnalytics.adaptive_sparklines(7, :day)
+
+      assert length(result.completed) == 7
+      assert is_list(result.total)
+    end
+
+    test "valores son enteros no negativos" do
+      result = WorkflowAnalytics.adaptive_sparklines(4, :hour)
+
+      Enum.each(result.completed, fn v ->
+        assert is_integer(v) && v >= 0
+      end)
+    end
+  end
+
+  # ============================================================================
   # Helpers
   # ============================================================================
 

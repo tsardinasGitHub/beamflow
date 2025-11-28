@@ -260,6 +260,47 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
     |> Enum.reverse()
   end
 
+  @doc """
+  Genera sparklines adaptativos según unidad de tiempo.
+
+  - `:hour` - datos por hora (para filtros cortos)
+  - `:day` - datos por día (para filtros largos)
+
+  Retorna mapa con sparklines para completed, failed, total.
+  """
+  @spec adaptive_sparklines(integer(), atom()) :: map()
+  def adaptive_sparklines(count, unit \\ :hour) do
+    now = DateTime.utc_now()
+
+    data = case unit do
+      :day ->
+        0..(count - 1)
+        |> Enum.map(fn days_ago ->
+          day_start = DateTime.add(now, -days_ago * 86400, :second)
+          day_end = DateTime.add(day_start, 86400, :second)
+          stats = count_workflows_by_status_in_range(day_start, day_end)
+          %{completed: stats.completed, failed: stats.failed, total: stats.completed + stats.failed}
+        end)
+        |> Enum.reverse()
+
+      _ -> # :hour
+        0..(count - 1)
+        |> Enum.map(fn hours_ago ->
+          hour_start = DateTime.add(now, -hours_ago * 3600, :second)
+          hour_end = DateTime.add(hour_start, 3600, :second)
+          stats = count_workflows_by_status_in_range(hour_start, hour_end)
+          %{completed: stats.completed, failed: stats.failed, total: stats.completed + stats.failed}
+        end)
+        |> Enum.reverse()
+    end
+
+    %{
+      completed: Enum.map(data, & &1.completed),
+      failed: Enum.map(data, & &1.failed),
+      total: Enum.map(data, & &1.total)
+    }
+  end
+
   defp get_daily_counts(days) do
     today = Date.utc_today()
 

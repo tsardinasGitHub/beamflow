@@ -35,10 +35,12 @@ defmodule BeamflowWeb.Router do
     live "/analytics", AnalyticsLive
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", BeamflowWeb do
-  #   pipe_through :api
-  # end
+  # API REST para exportación programática
+  scope "/api", BeamflowWeb do
+    pipe_through :api
+
+    get "/analytics/export", AnalyticsController, :export
+  end
 
   # Enable LiveDashboard only for development
   #

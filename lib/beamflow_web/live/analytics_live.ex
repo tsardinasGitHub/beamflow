@@ -34,6 +34,7 @@ defmodule BeamflowWeb.AnalyticsLive do
       |> assign(loading: true)
       |> assign(last_updated: DateTime.utc_now())
       |> assign(filter_range: :all)
+      |> assign(custom_date: nil)
       |> assign(is_sampled: false)
       |> assign(sparklines: %{completed: [], failed: [], total: []})
       |> assign(weekly_heatmap: [])
@@ -68,7 +69,35 @@ defmodule BeamflowWeb.AnalyticsLive do
   @impl true
   def handle_event("filter", %{"range" => range}, socket) do
     filter_range = String.to_existing_atom(range)
-    socket = socket |> assign(filter_range: filter_range) |> load_all_metrics()
+    socket = socket
+      |> assign(filter_range: filter_range)
+      |> assign(custom_date: nil)
+      |> load_all_metrics()
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("heatmap_click", %{"date" => date_str}, socket) do
+    # Parse date and set custom filter
+    case Date.from_iso8601(date_str) do
+      {:ok, date} ->
+        socket = socket
+          |> assign(filter_range: :custom)
+          |> assign(custom_date: date)
+          |> load_all_metrics()
+        {:noreply, socket}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("clear_custom_date", _params, socket) do
+    socket = socket
+      |> assign(filter_range: :all)
+      |> assign(custom_date: nil)
+      |> load_all_metrics()
     {:noreply, socket}
   end
 
@@ -109,6 +138,7 @@ defmodule BeamflowWeb.AnalyticsLive do
   defp mime_type(:csv), do: "text/csv"
 
   defp build_filter_opts(:all), do: []
+  defp build_filter_opts(:custom), do: []  # Handled separately with custom_date
   defp build_filter_opts(:today) do
     now = DateTime.utc_now()
     date_from = now |> DateTime.to_date() |> DateTime.new!(~T[00:00:00])
@@ -125,6 +155,25 @@ defmodule BeamflowWeb.AnalyticsLive do
     date_from = DateTime.add(now, -30 * 86400, :second)
     [date_from: date_from, date_to: now]
   end
+
+  defp build_filter_opts_with_custom(filter_range, custom_date) do
+    case {filter_range, custom_date} do
+      {:custom, %Date{} = date} ->
+        date_from = DateTime.new!(date, ~T[00:00:00])
+        date_to = DateTime.add(date_from, 86400, :second)
+        [date_from: date_from, date_to: date_to]
+
+      _ ->
+        build_filter_opts(filter_range)
+    end
+  end
+
+  # Sparkline hours based on filter range
+  defp sparkline_hours(:today), do: 6
+  defp sparkline_hours(:week), do: 7   # 7 days
+  defp sparkline_hours(:month), do: 30  # 30 days
+  defp sparkline_hours(:custom), do: 24  # Full day in hours
+  defp sparkline_hours(_), do: 12  # Default
 
   @impl true
   def render(assigns) do
@@ -183,6 +232,20 @@ defmodule BeamflowWeb.AnalyticsLive do
                   Mes
                 </button>
               </div>
+
+              <!-- Custom Date Indicator -->
+              <%= if @custom_date do %>
+                <div class="flex items-center gap-2 bg-purple-600/20 border border-purple-500/30 rounded-lg px-3 py-1.5">
+                  <span class="text-purple-300 text-sm">📅 <%= @custom_date %></span>
+                  <button
+                    phx-click="clear_custom_date"
+                    class="text-purple-400 hover:text-white transition-colors"
+                    title="Limpiar filtro"
+                  >
+                    ✕
+                  </button>
+                </div>
+              <% end %>
 
               <div class="h-6 w-px bg-slate-700"></div>
 
@@ -444,14 +507,16 @@ defmodule BeamflowWeb.AnalyticsLive do
         <% end %>
       </div>
 
-      <!-- Heatmap grid -->
+      <!-- Heatmap grid - Clickeable cells -->
       <div class="flex gap-1">
         <%= for {_week, days} <- @weeks do %>
           <div class="flex flex-col gap-1">
             <%= for day <- Enum.sort_by(days, & &1.day) do %>
               <div
-                class={"w-4 h-4 rounded-sm transition-colors cursor-pointer " <> heatmap_color(day.intensity)}
-                title={"#{day.date}: #{day.count} workflows"}
+                phx-click="heatmap_click"
+                phx-value-date={Date.to_iso8601(day.date)}
+                class={"w-4 h-4 rounded-sm transition-all cursor-pointer hover:ring-2 hover:ring-white/50 hover:scale-110 " <> heatmap_color(day.intensity)}
+                title={"#{day.date}: #{day.count} workflows - Click para filtrar"}
               ></div>
             <% end %>
           </div>
@@ -460,14 +525,17 @@ defmodule BeamflowWeb.AnalyticsLive do
     </div>
 
     <!-- Legend -->
-    <div class="flex items-center gap-2 mt-4 text-xs text-slate-500">
-      <span>Menos</span>
-      <div class="w-3 h-3 rounded-sm bg-slate-800"></div>
-      <div class="w-3 h-3 rounded-sm bg-emerald-900"></div>
-      <div class="w-3 h-3 rounded-sm bg-emerald-700"></div>
-      <div class="w-3 h-3 rounded-sm bg-emerald-500"></div>
-      <div class="w-3 h-3 rounded-sm bg-emerald-400"></div>
-      <span>Más</span>
+    <div class="flex items-center justify-between mt-4">
+      <div class="flex items-center gap-2 text-xs text-slate-500">
+        <span>Menos</span>
+        <div class="w-3 h-3 rounded-sm bg-slate-800"></div>
+        <div class="w-3 h-3 rounded-sm bg-emerald-900"></div>
+        <div class="w-3 h-3 rounded-sm bg-emerald-700"></div>
+        <div class="w-3 h-3 rounded-sm bg-emerald-500"></div>
+        <div class="w-3 h-3 rounded-sm bg-emerald-400"></div>
+        <span>Más</span>
+      </div>
+      <span class="text-xs text-slate-500 italic">Click en celda para ver ese día</span>
     </div>
     """
   end
@@ -480,7 +548,7 @@ defmodule BeamflowWeb.AnalyticsLive do
   defp heatmap_color(_), do: "bg-emerald-400"
 
   defp build_sparkline_path([]), do: "M0,12 L64,12"
-  defp build_sparkline_path(data) do
+  defp build_sparkline_path(data) when is_list(data) and length(data) > 0 do
     max_val = Enum.max(data) |> max(1)
     points = data
       |> Enum.with_index()
@@ -498,6 +566,7 @@ defmodule BeamflowWeb.AnalyticsLive do
       acc <> " L#{Float.round(x, 1)},#{Float.round(y, 1)}"
     end)
   end
+  defp build_sparkline_path(_), do: "M0,12 L64,12"
 
   attr :rate, :float, required: true
 
@@ -763,9 +832,17 @@ defmodule BeamflowWeb.AnalyticsLive do
 
   defp load_all_metrics(socket) do
     filter_range = socket.assigns[:filter_range] || :all
-    opts = build_filter_opts(filter_range)
+    custom_date = socket.assigns[:custom_date]
+    opts = build_filter_opts_with_custom(filter_range, custom_date)
+
+    # Sparkline hours adaptativos según el filtro
+    sparkline_hrs = sparkline_hours(filter_range)
+    sparkline_unit = if filter_range in [:week, :month], do: :day, else: :hour
 
     metrics = WorkflowAnalytics.dashboard_metrics(opts)
+
+    # Obtener sparklines adaptativos
+    sparklines = WorkflowAnalytics.adaptive_sparklines(sparkline_hrs, sparkline_unit)
 
     socket
     |> assign(loading: false)
@@ -776,7 +853,7 @@ defmodule BeamflowWeb.AnalyticsLive do
     |> assign(hourly_trend: metrics.hourly_trend)
     |> assign(daily_trend: metrics.daily_trend)
     |> assign(weekly_heatmap: metrics.weekly_heatmap)
-    |> assign(sparklines: metrics.sparklines)
+    |> assign(sparklines: sparklines)
     |> assign(by_module: metrics.by_module)
     |> assign(step_performance: metrics.step_performance)
     |> assign(recent_failures: metrics.recent_failures)
