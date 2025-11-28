@@ -47,9 +47,11 @@ defmodule BeamflowWeb.WorkflowGraphLive do
         page_title: "Grafo: #{id}",
         workflow_id: id,
         selected_node: nil,
-        show_details: false
+        show_details: false,
+        step_timings: %{}
       )
       |> load_workflow(id)
+      |> load_step_timings(id)
       |> build_graph_data()
 
     {:ok, socket}
@@ -102,6 +104,11 @@ defmodule BeamflowWeb.WorkflowGraphLive do
   end
 
   @impl true
+  def handle_event("export_svg", _params, socket) do
+    {:noreply, push_event(socket, "export_svg", %{filename: "workflow-#{socket.assigns.workflow_id}.svg"})}
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
     <div class="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
@@ -129,7 +136,19 @@ defmodule BeamflowWeb.WorkflowGraphLive do
           </div>
 
           <%= if @workflow do %>
-            <.workflow_status_badge status={@workflow.status} />
+            <div class="flex items-center gap-3">
+              <button
+                phx-click="export_svg"
+                class="flex items-center gap-2 px-4 py-2 bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/30 rounded-lg text-purple-200 transition-colors"
+                title="Exportar como SVG"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                SVG
+              </button>
+              <.workflow_status_badge status={@workflow.status} />
+            </div>
           <% end %>
         </div>
       </div>
@@ -219,6 +238,9 @@ defmodule BeamflowWeb.WorkflowGraphLive do
                   data-node-id={node.id}
                   data-node-state={node.state}
                 >
+                  <!-- SVG Tooltip -->
+                  <title><%= node.tooltip %></title>
+                  
                   <!-- Node background -->
                   <rect
                     x={node.x}
@@ -232,7 +254,6 @@ defmodule BeamflowWeb.WorkflowGraphLive do
                     stroke-width={if node.state == :running, do: "3", else: "2"}
                     filter={if node.state == :running, do: "url(#glow)", else: "none"}
                     class={node_animation_class(node.state)}
-                  />
                   />
 
                   <!-- Step icon -->
@@ -460,6 +481,46 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     assign(socket, :workflow, workflow)
   end
 
+  defp load_step_timings(socket, workflow_id) do
+    events = case WorkflowStore.get_events(workflow_id) do
+      {:ok, events} -> events
+      {:error, _} -> []
+    end
+
+    # Agrupar eventos por step_index para obtener timing
+    timings = events
+    |> Enum.reduce(%{}, fn event, acc ->
+      step_index = event.metadata[:step_index]
+      
+      case {event.event_type, step_index} do
+        {:step_started, idx} when is_integer(idx) ->
+          Map.update(acc, idx, %{started_at: event.timestamp}, &Map.put(&1, :started_at, event.timestamp))
+        
+        {:step_completed, idx} when is_integer(idx) ->
+          duration = event.metadata[:duration_ms] || 0
+          Map.update(acc, idx, %{completed_at: event.timestamp, duration_ms: duration}, fn existing ->
+            existing
+            |> Map.put(:completed_at, event.timestamp)
+            |> Map.put(:duration_ms, duration)
+          end)
+        
+        {:step_failed, idx} when is_integer(idx) ->
+          duration = event.metadata[:duration_ms] || 0
+          error = event.metadata[:reason] || "Unknown error"
+          Map.update(acc, idx, %{failed_at: event.timestamp, duration_ms: duration, error: error}, fn existing ->
+            existing
+            |> Map.put(:failed_at, event.timestamp)
+            |> Map.put(:duration_ms, duration)
+            |> Map.put(:error, error)
+          end)
+        
+        _ -> acc
+      end
+    end)
+
+    assign(socket, :step_timings, timings)
+  end
+
   defp build_graph_data(socket) do
     case socket.assigns.workflow do
       nil ->
@@ -468,9 +529,12 @@ defmodule BeamflowWeb.WorkflowGraphLive do
       workflow ->
         # Obtener el grafo del workflow
         graph = get_workflow_graph(workflow.workflow_module)
+        
+        # Obtener timings para los nodos
+        step_timings = socket.assigns[:step_timings] || %{}
 
-        # Construir nodos con posiciones
-        nodes = build_nodes(graph, workflow)
+        # Construir nodos con posiciones y timing
+        nodes = build_nodes(graph, workflow, step_timings)
 
         # Construir edges
         edges = build_edges(graph, nodes)
@@ -499,7 +563,7 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     end
   end
 
-  defp build_nodes(graph, workflow) do
+  defp build_nodes(graph, workflow, step_timings) do
     current_step = workflow.current_step_index || 0
     status = workflow.status
 
@@ -510,10 +574,14 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     |> Enum.with_index()
     |> Enum.map(fn {node, index} ->
       state = calculate_node_state(index, current_step, status)
+      timing = Map.get(step_timings, index, %{})
 
       # Calcular posición (layout horizontal)
       x = @padding + index * @node_spacing_x
       y = @padding
+
+      # Construir tooltip con timing
+      tooltip = build_tooltip(state, timing)
 
       %{
         id: node.id,
@@ -522,10 +590,80 @@ defmodule BeamflowWeb.WorkflowGraphLive do
         module: format_module_full(node.module),
         state: state,
         x: x,
-        y: y
+        y: y,
+        timing: timing,
+        tooltip: tooltip
       }
     end)
   end
+
+  defp build_tooltip(state, timing) do
+    lines = ["Estado: #{state_to_text(state)}"]
+    
+    lines = if timing[:started_at] do
+      lines ++ ["Inicio: #{format_timestamp(timing.started_at)}"]
+    else
+      lines
+    end
+    
+    lines = if timing[:completed_at] do
+      lines ++ ["Fin: #{format_timestamp(timing.completed_at)}"]
+    else
+      if timing[:failed_at] do
+        lines ++ ["Falló: #{format_timestamp(timing.failed_at)}"]
+      else
+        lines
+      end
+    end
+    
+    lines = if timing[:duration_ms] do
+      lines ++ ["Duración: #{format_duration(timing.duration_ms)}"]
+    else
+      lines
+    end
+    
+    lines = if timing[:error] do
+      lines ++ ["Error: #{truncate_error(timing.error)}"]
+    else
+      lines
+    end
+    
+    Enum.join(lines, "\n")
+  end
+  
+  defp state_to_text(:pending), do: "Pendiente"
+  defp state_to_text(:running), do: "Ejecutando"
+  defp state_to_text(:completed), do: "Completado"
+  defp state_to_text(:failed), do: "Fallido"
+  defp state_to_text(_), do: "Desconocido"
+  
+  defp format_timestamp(nil), do: "-"
+  defp format_timestamp(timestamp) when is_binary(timestamp), do: timestamp
+  defp format_timestamp(%DateTime{} = dt) do
+    Calendar.strftime(dt, "%H:%M:%S")
+  end
+  defp format_timestamp(_), do: "-"
+  
+  defp format_duration(nil), do: "-"
+  defp format_duration(ms) when ms < 1000, do: "#{ms}ms"
+  defp format_duration(ms) when ms < 60_000 do
+    seconds = ms / 1000
+    :erlang.float_to_binary(seconds, decimals: 2) <> "s"
+  end
+  defp format_duration(ms) do
+    minutes = div(ms, 60_000)
+    seconds = rem(ms, 60_000) / 1000
+    "#{minutes}m #{:erlang.float_to_binary(seconds, decimals: 1)}s"
+  end
+  
+  defp truncate_error(error) when is_binary(error) do
+    if String.length(error) > 30 do
+      String.slice(error, 0, 27) <> "..."
+    else
+      error
+    end
+  end
+  defp truncate_error(error), do: inspect(error) |> truncate_error()
 
   defp calculate_node_state(index, current_step, workflow_status) do
     cond do

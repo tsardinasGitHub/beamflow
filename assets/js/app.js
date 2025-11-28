@@ -142,6 +142,58 @@ const GraphZoomPan = {
     this.handleEvent("zoom_fit", () => {
       this.fitToContainer()
     })
+    
+    // Export SVG functionality
+    this.handleEvent("export_svg", ({filename}) => {
+      this.exportSVG(filename || "workflow-graph.svg")
+    })
+  },
+  
+  exportSVG(filename) {
+    if (!this.svg) return
+    
+    // Clone the SVG to avoid modifying the original
+    const svgClone = this.svg.cloneNode(true)
+    
+    // Remove interactive attributes and add styling
+    svgClone.removeAttribute('phx-hook')
+    svgClone.querySelectorAll('[phx-click]').forEach(el => {
+      el.removeAttribute('phx-click')
+      el.removeAttribute('phx-value-node-id')
+    })
+    
+    // Add background color
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
+    rect.setAttribute('width', '100%')
+    rect.setAttribute('height', '100%')
+    rect.setAttribute('fill', '#1e293b') // slate-800
+    svgClone.insertBefore(rect, svgClone.firstChild)
+    
+    // Add inline styles from CSS animations (simplified static version)
+    svgClone.querySelectorAll('.graph-node-running').forEach(el => {
+      el.style.filter = 'drop-shadow(0 0 8px rgba(59, 130, 246, 0.6))'
+    })
+    
+    // Serialize and download
+    const serializer = new XMLSerializer()
+    let source = serializer.serializeToString(svgClone)
+    
+    // Add XML declaration and namespace
+    if (!source.match(/^<\?xml/)) {
+      source = '<?xml version="1.0" standalone="no"?>\r\n' + source
+    }
+    
+    // Create blob and download
+    const blob = new Blob([source], {type: 'image/svg+xml;charset=utf-8'})
+    const url = URL.createObjectURL(blob)
+    
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
   },
   
   updateTransform() {
