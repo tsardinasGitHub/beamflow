@@ -56,6 +56,7 @@ defmodule Beamflow.Engine.WorkflowActor do
 
   require Logger
 
+  alias Beamflow.Engine.Idempotency
   alias Beamflow.Engine.Registry, as: WorkflowRegistry
   alias Beamflow.Storage.WorkflowStore
 
@@ -298,50 +299,111 @@ defmodule Beamflow.Engine.WorkflowActor do
     step_name = inspect(step_module)
     start_time = System.monotonic_time(:millisecond)
 
-    # Registrar inicio del step
-    record_event(workflow_id, :step_started, %{step: step_name, step_index: step_index})
+    # ══════════════════════════════════════════════════════════════════════════
+    # IDEMPOTENCIA CENTRALIZADA - FASE 1: BEFORE EXECUTE
+    # ══════════════════════════════════════════════════════════════════════════
+    # Verificamos si el step ya se ejecutó (crash recovery) o está pendiente.
+    # Esto garantiza exactly-once para side-effects externos.
+    # ══════════════════════════════════════════════════════════════════════════
+    case Idempotency.begin_step(workflow_id, step_module) do
+      {:already_completed, cached_result} ->
+        # Step ya completado anteriormente - usar resultado cacheado
+        Logger.info("Workflow #{workflow_id}: Step #{step_name} already completed, using cached result")
 
-    case step_module.execute(workflow_state) do
+        record_event(workflow_id, :step_skipped, %{
+          step: step_name,
+          step_index: step_index,
+          reason: :idempotency_cache_hit
+        })
+
+        advance_to_next_step(step_module, workflow_module, state, cached_result)
+
+      {:already_pending, idempotency_key} ->
+        # Step pendiente (posible crash recovery) - reintentar con misma key
+        Logger.warning("Workflow #{workflow_id}: Step #{step_name} was pending, retrying with same key")
+        do_execute_step(step_module, workflow_module, state, idempotency_key, start_time)
+
+      {:ok, idempotency_key} ->
+        # Caso normal - nueva ejecución
+        record_event(workflow_id, :step_started, %{step: step_name, step_index: step_index})
+        do_execute_step(step_module, workflow_module, state, idempotency_key, start_time)
+    end
+  end
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # IDEMPOTENCIA CENTRALIZADA - FASE 2: EXECUTE
+  # ════════════════════════════════════════════════════════════════════════════
+  # Ejecuta el step inyectando la idempotency_key en el estado.
+  # Los steps con side-effects pueden usar esta key para llamadas externas.
+  # ════════════════════════════════════════════════════════════════════════════
+  defp do_execute_step(step_module, workflow_module, state, idempotency_key, start_time) do
+    %{workflow_state: workflow_state, workflow_id: workflow_id, current_step_index: step_index} = state
+    step_name = inspect(step_module)
+
+    # Inyectar idempotency_key en el estado del workflow
+    # Los steps pueden usarla para llamadas a servicios externos
+    enriched_state = Map.put(workflow_state, :idempotency_key, idempotency_key)
+
+    case step_module.execute(enriched_state) do
       {:ok, updated_workflow_state} ->
         duration_ms = System.monotonic_time(:millisecond) - start_time
         Logger.debug("Workflow #{workflow_id}: Step #{step_name} succeeded in #{duration_ms}ms")
 
-        # Registrar éxito del step
+        # ════════════════════════════════════════════════════════════════════════
+        # IDEMPOTENCIA CENTRALIZADA - FASE 3: AFTER EXECUTE (SUCCESS)
+        # ════════════════════════════════════════════════════════════════════════
+        # Marcar como completado DESPUÉS del side-effect pero ANTES de persistir.
+        # Si crash aquí, el step se considera completado y no se re-ejecuta.
+        # ════════════════════════════════════════════════════════════════════════
+        Idempotency.complete_step(idempotency_key, updated_workflow_state)
+
         record_event(workflow_id, :step_completed, %{
           step: step_name,
           step_index: step_index,
-          duration_ms: duration_ms
+          duration_ms: duration_ms,
+          idempotency_key: idempotency_key
         })
 
-        # Llamar al callback de éxito del workflow
-        new_workflow_state =
-          workflow_module.handle_step_success(step_module, updated_workflow_state)
-
-        new_state = %{state |
-          workflow_state: new_workflow_state,
-          current_step_index: state.current_step_index + 1
-        }
-
-        broadcast_update(new_state)
-        persist_state(new_state)
-
-        # Continuar con el siguiente step
-        {:noreply, new_state, {:continue, :execute_next_step}}
+        advance_to_next_step(step_module, workflow_module, state, updated_workflow_state)
 
       {:error, reason} ->
         duration_ms = System.monotonic_time(:millisecond) - start_time
         Logger.error("Workflow #{workflow_id}: Step #{step_name} failed in #{duration_ms}ms - #{inspect(reason)}")
 
-        # Registrar fallo del step
+        # ════════════════════════════════════════════════════════════════════════
+        # IDEMPOTENCIA CENTRALIZADA - FASE 3: AFTER EXECUTE (FAILURE)
+        # ════════════════════════════════════════════════════════════════════════
+        # Marcar como fallido permite retries con nueva key de intento.
+        # ════════════════════════════════════════════════════════════════════════
+        Idempotency.fail_step(idempotency_key, reason)
+
         record_event(workflow_id, :step_failed, %{
           step: step_name,
           step_index: step_index,
           duration_ms: duration_ms,
-          error: inspect(reason)
+          error: inspect(reason),
+          idempotency_key: idempotency_key
         })
 
         handle_step_error(step_module, reason, workflow_module, state)
     end
+  end
+
+  defp advance_to_next_step(step_module, workflow_module, state, updated_workflow_state) do
+    # Llamar al callback de éxito del workflow
+    new_workflow_state =
+      workflow_module.handle_step_success(step_module, updated_workflow_state)
+
+    new_state = %{state |
+      workflow_state: new_workflow_state,
+      current_step_index: state.current_step_index + 1
+    }
+
+    broadcast_update(new_state)
+    persist_state(new_state)
+
+    # Continuar con el siguiente step
+    {:noreply, new_state, {:continue, :execute_next_step}}
   end
 
   defp handle_step_error(step_module, reason, workflow_module, state) do

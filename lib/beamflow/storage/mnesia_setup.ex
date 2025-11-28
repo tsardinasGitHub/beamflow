@@ -50,6 +50,7 @@ defmodule Beamflow.Storage.MnesiaSetup do
   # Nombres de tablas
   @workflows_table :beamflow_workflows
   @events_table :beamflow_events
+  @idempotency_table :beamflow_idempotency
 
   @doc """
   Instala el schema y tablas de Mnesia.
@@ -92,11 +93,12 @@ defmodule Beamflow.Storage.MnesiaSetup do
     # 4. Crear tablas
     create_workflows_table(nodes)
     create_events_table(nodes)
+    create_idempotency_table(nodes)
 
     # 5. Esperar a que las tablas estén listas
-    :mnesia.wait_for_tables([@workflows_table, @events_table], 5000)
+    :mnesia.wait_for_tables([@workflows_table, @events_table, @idempotency_table], 5000)
 
-    Logger.info("Mnesia setup completed. Tables: #{inspect([@workflows_table, @events_table])}")
+    Logger.info("Mnesia setup completed. Tables: #{inspect([@workflows_table, @events_table, @idempotency_table])}")
 
     # 6. Detener Mnesia para que Application lo inicie
     :mnesia.stop()
@@ -130,10 +132,15 @@ defmodule Beamflow.Storage.MnesiaSetup do
       create_events_table(nodes)
     end
 
+    # Crear tabla de idempotencia si no existe
+    unless @idempotency_table in existing_tables do
+      create_idempotency_table(nodes)
+    end
+
     # Esperar a que estén listas
-    case :mnesia.wait_for_tables([@workflows_table, @events_table], 10_000) do
+    case :mnesia.wait_for_tables([@workflows_table, @events_table, @idempotency_table], 10_000) do
       :ok ->
-        Logger.info("Mnesia tables ready: #{inspect([@workflows_table, @events_table])}")
+        Logger.info("Mnesia tables ready: #{inspect([@workflows_table, @events_table, @idempotency_table])}")
         :ok
 
       {:timeout, tables} ->
@@ -159,7 +166,7 @@ defmodule Beamflow.Storage.MnesiaSetup do
   @spec drop_tables() :: :ok | {:error, term()}
   def drop_tables do
     results =
-      [@workflows_table, @events_table]
+      [@workflows_table, @events_table, @idempotency_table]
       |> Enum.map(fn table ->
         case :mnesia.delete_table(table) do
           {:atomic, :ok} ->
@@ -263,6 +270,38 @@ defmodule Beamflow.Storage.MnesiaSetup do
 
       {:aborted, reason} ->
         Logger.error("Failed to create table '#{@events_table}': #{inspect(reason)}")
+    end
+  end
+
+  defp create_idempotency_table(nodes) do
+    # Tabla para garantizar idempotencia de steps
+    # Almacena estado de ejecución para recuperación ante crashes
+    attributes = [
+      :key,           # "{workflow_id}:{step}:{attempt}"
+      :status,        # :pending | :completed | :failed
+      :started_at,    # DateTime inicio
+      :completed_at,  # DateTime fin (nil si pending)
+      :result,        # Resultado del step (map)
+      :error          # Error si falló
+    ]
+
+    storage_type = storage_type_for_env()
+
+    table_opts = [
+      attributes: attributes,
+      type: :set
+    ] ++ storage_opts(storage_type, nodes)
+
+    case :mnesia.create_table(@idempotency_table, table_opts) do
+      {:atomic, :ok} ->
+        Logger.info("Table '#{@idempotency_table}' created with #{storage_type}")
+        create_index(@idempotency_table, :status)
+
+      {:aborted, {:already_exists, _}} ->
+        Logger.debug("Table '#{@idempotency_table}' already exists")
+
+      {:aborted, reason} ->
+        Logger.error("Failed to create table '#{@idempotency_table}': #{inspect(reason)}")
     end
   end
 

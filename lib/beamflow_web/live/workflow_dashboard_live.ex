@@ -52,9 +52,11 @@ defmodule BeamflowWeb.WorkflowDashboardLive do
   def handle_event("create_test_workflow", _params, socket) do
     # Crear un workflow de prueba
     workflow_id = "req-#{:rand.uniform(9999)}"
+    user_num = :rand.uniform(100)
 
     params = %{
-      "applicant_name" => "Test User #{:rand.uniform(100)}",
+      "applicant_name" => "Test User #{user_num}",
+      "applicant_email" => "test.user.#{user_num}@beamflow.dev",
       "dni" => "#{:rand.uniform(99_999_999) |> Integer.to_string() |> String.pad_leading(8, "0")}",
       "vehicle_model" => "Toyota Corolla 2020",
       "vehicle_year" => "2020",

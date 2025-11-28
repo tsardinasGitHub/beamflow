@@ -11,6 +11,7 @@ defmodule Beamflow.Domains.Insurance.InsuranceWorkflow do
   2. **CheckCreditScore** - Consultar bureau de crédito (simulado)
   3. **EvaluateVehicleRisk** - Verificar vehículo y calcular prima
   4. **ApproveRequest** - Decisión final basada en todos los datos
+  5. **SendConfirmationEmail** - Enviar email con el veredicto (idempotente)
 
   ## Ejemplo de Uso
 
@@ -20,6 +21,7 @@ defmodule Beamflow.Domains.Insurance.InsuranceWorkflow do
         "req-123",
         %{
           "applicant_name" => "Juan Pérez",
+          "applicant_email" => "juan.perez@email.com",
           "dni" => "12345678",
           "vehicle_model" => "Toyota Corolla",
           "vehicle_year" => "2020",
@@ -27,7 +29,7 @@ defmodule Beamflow.Domains.Insurance.InsuranceWorkflow do
         }
       )
 
-      # El workflow ejecutará automáticamente los 4 steps
+      # El workflow ejecutará automáticamente los 5 steps
       # Consultar estado:
       {:ok, state} = Beamflow.Engine.WorkflowActor.get_state("req-123")
 
@@ -47,7 +49,8 @@ defmodule Beamflow.Domains.Insurance.InsuranceWorkflow do
     ValidateIdentity,
     CheckCreditScore,
     EvaluateVehicleRisk,
-    ApproveRequest
+    ApproveRequest,
+    SendConfirmationEmail
   }
 
   @impl true
@@ -56,7 +59,8 @@ defmodule Beamflow.Domains.Insurance.InsuranceWorkflow do
       ValidateIdentity,
       CheckCreditScore,
       EvaluateVehicleRisk,
-      ApproveRequest
+      ApproveRequest,
+      SendConfirmationEmail
     ]
   end
 
@@ -65,6 +69,7 @@ defmodule Beamflow.Domains.Insurance.InsuranceWorkflow do
     %{
       # Datos del solicitante
       applicant_name: params["applicant_name"],
+      applicant_email: params["applicant_email"] || generate_demo_email(params["applicant_name"]),
       dni: params["dni"],
 
       # Datos del vehículo
@@ -116,4 +121,15 @@ defmodule Beamflow.Domains.Insurance.InsuranceWorkflow do
   defp format_error(error) when is_atom(error), do: Atom.to_string(error)
   defp format_error(error) when is_binary(error), do: error
   defp format_error(error), do: inspect(error)
+
+  # Genera un email de demo basado en el nombre del solicitante
+  defp generate_demo_email(nil), do: "demo@beamflow.dev"
+  defp generate_demo_email(name) do
+    slug = name
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/, ".")
+    |> String.trim(".")
+
+    "#{slug}@beamflow.dev"
+  end
 end

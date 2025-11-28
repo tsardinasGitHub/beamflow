@@ -75,14 +75,18 @@ defmodule Beamflow.Domains.Insurance.Steps.ApproveRequest do
 
     case decision do
       {:approved, _} ->
-        Logger.info("ApproveRequest: Solicitud APROBADA")
+        policy_number = generate_policy_number()
+        Logger.info("ApproveRequest: Solicitud APROBADA - Póliza #{policy_number}")
 
         updated_state =
-          Map.put(state, :final_decision, %{
+          state
+          |> Map.put(:final_decision, %{
             status: :approved,
             reason: nil,
             decided_at: DateTime.utc_now()
           })
+          |> Map.put(:policy_number, policy_number)
+          |> Map.put(:approved, true)
 
         {:ok, updated_state}
 
@@ -90,11 +94,13 @@ defmodule Beamflow.Domains.Insurance.Steps.ApproveRequest do
         Logger.warning("ApproveRequest: Solicitud RECHAZADA - #{reason}")
 
         updated_state =
-          Map.put(state, :final_decision, %{
+          state
+          |> Map.put(:final_decision, %{
             status: :rejected,
             reason: reason,
             decided_at: DateTime.utc_now()
           })
+          |> Map.put(:approved, false)
 
         {:ok, updated_state}
     end
@@ -176,4 +182,11 @@ defmodule Beamflow.Domains.Insurance.Steps.ApproveRequest do
   end
 
   defp check_premium_affordability(_), do: {:reject, "Sin cálculo de prima"}
+
+  defp generate_policy_number do
+    # Formato: POL-YYYYMMDD-XXXXX
+    date_part = DateTime.utc_now() |> Calendar.strftime("%Y%m%d")
+    random_part = :rand.uniform(99999) |> Integer.to_string() |> String.pad_leading(5, "0")
+    "POL-#{date_part}-#{random_part}"
+  end
 end
