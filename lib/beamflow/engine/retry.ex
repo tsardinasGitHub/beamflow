@@ -194,6 +194,23 @@ defmodule Beamflow.Engine.Retry do
     }
   end
 
+  def policy(:payment) do
+    %{
+      max_attempts: 3,
+      base_delay_ms: 1_000,
+      max_delay_ms: 10_000,
+      jitter: true,
+      retryable_errors: [
+        :timeout,
+        :service_unavailable,
+        :gateway_timeout,
+        :connection_refused,
+        :rate_limited,
+        :temporary_failure
+      ]
+    }
+  end
+
   def policy(:none) do
     %{
       max_attempts: 1,

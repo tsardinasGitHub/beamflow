@@ -56,6 +56,8 @@ defmodule Beamflow.Engine.WorkflowActor do
 
   require Logger
 
+  alias Beamflow.Engine.AlertSystem
+  alias Beamflow.Engine.DeadLetterQueue
   alias Beamflow.Engine.Idempotency
   alias Beamflow.Engine.Registry, as: WorkflowRegistry
   alias Beamflow.Engine.Retry
@@ -621,6 +623,23 @@ defmodule Beamflow.Engine.WorkflowActor do
         []
       end
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # DLQ & ALERTS - Manejar compensaciones fallidas
+    # ══════════════════════════════════════════════════════════════════════════
+    failed_compensations = Enum.filter(compensation_results, &match?({:error, _}, &1))
+
+    if Enum.any?(failed_compensations) do
+      handle_failed_compensations(
+        workflow_id,
+        workflow_module,
+        step_module,
+        reason,
+        saga_steps,
+        failed_compensations,
+        workflow_state
+      )
+    end
+
     # Llamar al callback de fallo del workflow
     new_workflow_state =
       workflow_module.handle_step_failure(step_module, reason, workflow_state)
@@ -636,13 +655,83 @@ defmodule Beamflow.Engine.WorkflowActor do
     record_event(workflow_id, :workflow_failed, %{
       step: inspect(step_module),
       error: inspect(reason),
-      compensations_executed: length(compensation_results)
+      compensations_executed: length(compensation_results),
+      compensations_failed: length(failed_compensations)
     })
+
+    # Enviar a DLQ si no hubo compensaciones o si todas fallaron
+    if Enum.empty?(saga_steps) or length(failed_compensations) == length(compensation_results) do
+      enqueue_to_dlq(
+        :workflow_failed,
+        workflow_id,
+        workflow_module,
+        step_module,
+        reason,
+        workflow_state
+      )
+    end
 
     broadcast_update(new_state)
     persist_state(new_state)
 
     {:noreply, new_state}
+  end
+
+  defp handle_failed_compensations(workflow_id, workflow_module, _failed_step, original_error, saga_steps, failed_compensations, workflow_state) do
+    # Identificar qué steps fallaron en compensación
+    failed_step_modules =
+      saga_steps
+      |> Enum.zip(failed_compensations)
+      |> Enum.filter(fn {_, result} -> match?({:error, _}, result) end)
+      |> Enum.map(fn {step, {:error, reason}} -> {step.module, reason} end)
+
+    Enum.each(failed_step_modules, fn {module, comp_error} ->
+      # Enviar entrada al DLQ por cada compensación fallida
+      enqueue_to_dlq(
+        :compensation_failed,
+        workflow_id,
+        workflow_module,
+        module,
+        {:compensation_failed, comp_error, original_error},
+        workflow_state
+      )
+
+      # Verificar si el step es crítico
+      is_critical =
+        function_exported?(module, :compensation_metadata, 0) and
+        module.compensation_metadata()[:critical] == true
+
+      if is_critical do
+        AlertSystem.send_critical(
+          "Critical Compensation Failed",
+          "Compensation for #{inspect(module)} failed in workflow #{workflow_id}",
+          %{
+            workflow_id: workflow_id,
+            step: inspect(module),
+            compensation_error: inspect(comp_error),
+            original_error: inspect(original_error)
+          }
+        )
+      end
+    end)
+  end
+
+  defp enqueue_to_dlq(type, workflow_id, workflow_module, failed_step, error, context) do
+    DeadLetterQueue.enqueue(%{
+      type: type,
+      workflow_id: workflow_id,
+      workflow_module: workflow_module,
+      failed_step: failed_step,
+      error: error,
+      context: context,
+      metadata: %{
+        enqueued_at: DateTime.utc_now(),
+        node: node()
+      }
+    })
+  rescue
+    e ->
+      Logger.error("Failed to enqueue to DLQ: #{Exception.message(e)}")
   end
 
   defp broadcast_update(state) do

@@ -104,7 +104,7 @@ defmodule Beamflow.Engine.Saga do
   """
   @callback compensation_metadata() :: map()
 
-  @optional_callbacks [compensation_metadata: 0]
+  @optional_callbacks [compensation_metadata: 0, execute: 2]
 
   # =============================================================================
   # Use Macro

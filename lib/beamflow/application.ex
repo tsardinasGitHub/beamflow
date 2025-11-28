@@ -20,6 +20,10 @@ defmodule Beamflow.Application do
       {Phoenix.PubSub, name: Beamflow.PubSub},
       # Registry for Circuit Breakers
       {Registry, keys: :unique, name: Beamflow.CircuitBreakerRegistry},
+      # Alert System for critical notifications
+      Beamflow.Engine.AlertSystem,
+      # Dead Letter Queue for failed workflows
+      Beamflow.Engine.DeadLetterQueue,
       # Route Loader for dynamic dispatch branches
       Beamflow.Workflows.RouteLoader,
       # Registry for Workflows
