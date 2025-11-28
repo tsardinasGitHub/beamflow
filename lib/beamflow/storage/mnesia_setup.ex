@@ -12,10 +12,19 @@ defmodule Beamflow.Storage.MnesiaSetup do
   - Ideal para demostrar conocimiento profundo de Erlang/OTP
   - Persistencia transparente con disc_copies
 
+  ## Tipos de Almacenamiento
+
+  El tipo de almacenamiento depende del nombre del nodo:
+
+  | Nodo | Comando | Tipo | Persistencia |
+  |------|---------|------|--------------|
+  | Anónimo | `iex -S mix` | `ram_copies` | ❌ Solo RAM |
+  | Nombrado | `iex --sname beamflow -S mix` | `disc_copies` | ✅ Disco |
+
   ## Uso
 
-      # Ejecutar una sola vez para crear schema y tablas
-      Beamflow.Storage.MnesiaSetup.install()
+      # Con nodo nombrado (persistencia en disco)
+      iex --sname beamflow -S mix run -e "Beamflow.Storage.MnesiaSetup.install()"
 
       # O al iniciar la aplicación (crea tablas si no existen)
       Beamflow.Storage.MnesiaSetup.ensure_tables()
@@ -25,12 +34,12 @@ defmodule Beamflow.Storage.MnesiaSetup do
   - `:beamflow_workflows` - Estado de cada workflow
     - Atributos: id, workflow_module, status, workflow_state, current_step_index,
       total_steps, started_at, completed_at, error, inserted_at, updated_at
-    - Tipo: disc_copies (persistencia en disco)
+    - Tipo: disc_copies (con nodo nombrado) o ram_copies (sin nombre)
     - Índices: status
 
   - `:beamflow_events` - Historial de eventos de cada workflow
     - Atributos: id, workflow_id, event_type, data, timestamp
-    - Tipo: disc_copies
+    - Tipo: disc_copies (con nodo nombrado) o ram_copies (sin nombre)
     - Índices: workflow_id, event_type
 
   Ver ADR-001 para justificación detallada de esta decisión arquitectónica.

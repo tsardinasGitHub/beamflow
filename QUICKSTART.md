@@ -1,8 +1,23 @@
 # 🚀 CÓMO PROBAR EL WORKFLOW - INSTRUCCIONES RÁPIDAS
 
-## ✅ Paso 1: IEx ya está corriendo
+## 💾 Modos de Ejecución
 
-Si estás viendo esto, `iex -S mix` ya debería estar ejecutándose.
+| Modo | Comando | Persistencia |
+|------|---------|-------------|
+| **RAM** (rápido) | `iex -S mix` | ❌ Datos se pierden |
+| **Disco** (producción) | `iex --sname beamflow -S mix` | ✅ Datos persisten |
+
+> **Recomendación:** Usa `--sname beamflow` para que los workflows sobrevivan reinicios.
+
+## ✅ Paso 1: Iniciar IEx
+
+```bash
+# Con persistencia en disco (recomendado)
+iex --sname beamflow -S mix
+
+# O sin persistencia (desarrollo rápido)
+iex -S mix
+```
 
 ## 📝 Paso 2: Copia y pega estos comandos en IEx
 

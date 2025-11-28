@@ -62,17 +62,27 @@ mix deps.get
 ### 2. Initialize Mnesia Database
 Before running the application for the first time, create the Mnesia schema and tables:
 ```bash
-mix run -e "Beamflow.Storage.MnesiaSetup.install()"
+# IMPORTANTE: Usar --sname para persistencia en disco
+iex --sname beamflow -S mix run -e "Beamflow.Storage.MnesiaSetup.install()"
 ```
 
 This command:
 - Creates the Mnesia schema on the current node
-- Initializes the `:workflows` table with disc_copies for persistence
+- Initializes the `:beamflow_workflows` and `:beamflow_events` tables
+- Uses `disc_copies` for persistence when running with a named node
 - Only needs to be run once (subsequent runs will skip if already exists)
+
+> **Nota sobre persistencia:**
+> - Con nodo nombrado (`--sname`): Los datos persisten en disco (`.mnesia/`)
+> - Sin nodo nombrado: Los datos se almacenan solo en RAM y se pierden al reiniciar
 
 ### 3. Run the Cluster
 Start the application in an IEx shell:
 ```bash
+# Con persistencia en disco (recomendado)
+iex --sname beamflow -S mix phx.server
+
+# Sin persistencia (solo RAM, para desarrollo rápido)
 iex -S mix phx.server
 ```
 

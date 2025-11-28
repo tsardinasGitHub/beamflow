@@ -161,16 +161,90 @@ mix test test/beamflow/
 
 ## 📊 Mnesia
 
+### Tipos de Almacenamiento
+
+Mnesia soporta dos tipos de almacenamiento:
+
+| Tipo | Comando | Persistencia | Uso |
+|------|---------|--------------|-----|
+| `ram_copies` | `iex -S mix` | ❌ Solo RAM | Desarrollo rápido |
+| `disc_copies` | `iex --sname beamflow -S mix` | ✅ Disco | Producción, testing |
+
+### ¿Por qué necesito `--sname`?
+
+Mnesia requiere un **nodo con nombre** para persistir datos en disco. Sin nombre, el nodo es "anónimo" (`nonode@nohost`) y Mnesia solo puede usar `ram_copies`.
+
+```bash
+# ❌ Nodo anónimo - datos se pierden al cerrar
+iex -S mix
+# Resultado: nonode@nohost
+
+# ✅ Nodo nombrado - datos persisten en .mnesia/
+iex --sname beamflow -S mix
+# Resultado: beamflow@hostname
+```
+
 ### Directorios por Entorno
-- **Desarrollo:** `.mnesia/dev/`
+- **Desarrollo:** `.mnesia/dev/beamflow@hostname/`
 - **Test:** `.mnesia/test/`
-- **Producción:** Configurado vía variables de entorno
+- **Producción:** Configurado vía `MNESIA_DIR` en `runtime.exs`
 
 ### Inicialización
+
 ```bash
-# La primera vez (si es necesario)
-mix run -e "Beamflow.Storage.MnesiaSetup.install()"
+# Primera vez: crear schema y tablas con persistencia
+iex --sname beamflow -S mix run -e "Beamflow.Storage.MnesiaSetup.install()"
+
+# Verificar tablas
+iex --sname beamflow -S mix
+iex> :mnesia.system_info(:tables)
+# [:beamflow_workflows, :beamflow_events, :schema]
 ```
+
+### Comandos Útiles
+
+```elixir
+# Ver tablas disponibles
+:mnesia.system_info(:tables)
+
+# Ver información de una tabla
+:mnesia.table_info(:beamflow_workflows, :all)
+
+# Contar registros
+:mnesia.table_info(:beamflow_workflows, :size)
+
+# Listar workflows
+Beamflow.Storage.WorkflowStore.list_workflows()
+
+# Estadísticas
+Beamflow.Storage.WorkflowStore.count_by_status()
+
+# Resetear tablas (¡CUIDADO! Borra datos)
+Beamflow.Storage.MnesiaSetup.reset_tables()
+```
+
+### Backup y Restore
+
+```bash
+# Backup (copiar directorio .mnesia/)
+cp -r .mnesia/dev/ backup_mnesia/
+
+# Restore
+cp -r backup_mnesia/ .mnesia/dev/
+```
+
+### Solución de Problemas
+
+**Error: "table already exists with different storage type"**
+```bash
+# Limpiar y recrear
+rm -rf .mnesia/
+iex --sname beamflow -S mix run -e "Beamflow.Storage.MnesiaSetup.install()"
+```
+
+**Error: "no disc_copies"**
+- Verifica que estás usando `--sname` o `--name`
+- El nodo debe tener nombre para usar disc_copies
 
 ## 🔒 Seguridad
 
