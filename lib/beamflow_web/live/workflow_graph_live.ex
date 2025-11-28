@@ -82,6 +82,26 @@ defmodule BeamflowWeb.WorkflowGraphLive do
   end
 
   @impl true
+  def handle_event("zoom_in", _params, socket) do
+    {:noreply, push_event(socket, "zoom_in", %{})}
+  end
+
+  @impl true
+  def handle_event("zoom_out", _params, socket) do
+    {:noreply, push_event(socket, "zoom_out", %{})}
+  end
+
+  @impl true
+  def handle_event("zoom_reset", _params, socket) do
+    {:noreply, push_event(socket, "zoom_reset", %{})}
+  end
+
+  @impl true
+  def handle_event("zoom_fit", _params, socket) do
+    {:noreply, push_event(socket, "zoom_fit", %{})}
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
     <div class="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
@@ -116,14 +136,19 @@ defmodule BeamflowWeb.WorkflowGraphLive do
 
       <!-- Graph Container -->
       <div class="p-6 flex gap-6">
-        <!-- SVG Graph -->
-        <div class="flex-1 bg-slate-800/50 backdrop-blur-sm rounded-2xl border border-white/10 overflow-hidden">
+        <!-- SVG Graph with Zoom/Pan -->
+        <div
+          id="graph-container"
+          class="flex-1 bg-slate-800/50 backdrop-blur-sm rounded-2xl border border-white/10 overflow-hidden graph-container relative"
+          phx-hook="GraphZoomPan"
+        >
           <%= if @workflow do %>
-            <svg
-              viewBox={"0 0 #{@svg_width} #{@svg_height}"}
-              class="w-full h-auto min-h-[500px]"
-              xmlns="http://www.w3.org/2000/svg"
-            >
+            <div class="graph-viewport" id="graph-viewport" phx-hook="NodeStateTracker">
+              <svg
+                viewBox={"0 0 #{@svg_width} #{@svg_height}"}
+                class="w-full h-auto min-h-[500px]"
+                xmlns="http://www.w3.org/2000/svg"
+              >
               <!-- Definitions for gradients and filters -->
               <defs>
                 <!-- Glow filter for active node -->
@@ -177,20 +202,22 @@ defmodule BeamflowWeb.WorkflowGraphLive do
                 <path
                   d={edge.path}
                   fill="none"
-                  stroke="#8b5cf6"
+                  stroke={edge_stroke_color(edge)}
                   stroke-width="2"
                   stroke-dasharray={if edge.pending, do: "5,5", else: "none"}
                   marker-end="url(#arrowhead)"
-                  class="transition-all duration-300"
+                  class={"graph-edge #{edge_animation_class(edge)}"}
                 />
               <% end %>
 
               <!-- Nodes -->
               <%= for node <- @nodes do %>
                 <g
-                  class="cursor-pointer group"
+                  class="cursor-pointer group graph-node"
                   phx-click="select_node"
                   phx-value-node-id={node.id}
+                  data-node-id={node.id}
+                  data-node-state={node.state}
                 >
                   <!-- Node background -->
                   <rect
@@ -204,7 +231,8 @@ defmodule BeamflowWeb.WorkflowGraphLive do
                     stroke={node_stroke_color(node.state)}
                     stroke-width={if node.state == :running, do: "3", else: "2"}
                     filter={if node.state == :running, do: "url(#glow)", else: "none"}
-                    class={"transition-all duration-300 #{if node.state == :running, do: "animate-pulse", else: ""}"}
+                    class={node_animation_class(node.state)}
+                  />
                   />
 
                   <!-- Step icon -->
@@ -257,6 +285,16 @@ defmodule BeamflowWeb.WorkflowGraphLive do
                 </g>
               <% end %>
             </svg>
+            </div>
+
+            <!-- Zoom Controls -->
+            <div class="zoom-controls">
+              <button phx-click="zoom_in" class="zoom-btn" title="Acercar">+</button>
+              <div class="zoom-level">100%</div>
+              <button phx-click="zoom_out" class="zoom-btn" title="Alejar">−</button>
+              <button phx-click="zoom_reset" class="zoom-btn text-sm" title="Restablecer">↺</button>
+              <button phx-click="zoom_fit" class="zoom-btn text-xs" title="Ajustar">⊡</button>
+            </div>
           <% else %>
             <div class="flex items-center justify-center h-96">
               <p class="text-slate-400">Workflow no encontrado</p>
@@ -525,17 +563,30 @@ defmodule BeamflowWeb.WorkflowGraphLive do
         to_node = Enum.find(nodes, &(&1.id == target_id))
 
         if from_node && to_node do
+          # Determine edge state based on connected nodes
+          edge_state = determine_edge_state(from_node.state, to_node.state)
+
           %{
             from: from_id,
             to: target_id,
             path: calculate_edge_path(from_node, to_node),
-            pending: from_node.state == :pending and to_node.state == :pending
+            pending: edge_state == :pending,
+            active: edge_state == :active,
+            completed: edge_state == :completed
           }
         end
       end)
       |> Enum.reject(&is_nil/1)
     end)
   end
+
+  # Edge is completed when both nodes are completed
+  defp determine_edge_state(:completed, :completed), do: :completed
+  # Edge is active when from is completed/running and to is running
+  defp determine_edge_state(:completed, :running), do: :active
+  defp determine_edge_state(:running, :pending), do: :active
+  # Otherwise pending
+  defp determine_edge_state(_, _), do: :pending
 
   defp calculate_edge_path(from_node, to_node) do
     # Punto de salida: centro-derecha del nodo origen
@@ -613,4 +664,17 @@ defmodule BeamflowWeb.WorkflowGraphLive do
   defp node_icon(:completed), do: "✅"
   defp node_icon(:failed), do: "❌"
   defp node_icon(_), do: "📦"
+
+  # Animation classes for nodes
+  defp node_animation_class(:running), do: "graph-node-running"
+  defp node_animation_class(_), do: "transition-all duration-500"
+
+  # Edge styling based on state
+  defp edge_stroke_color(%{completed: true}), do: "#22c55e"
+  defp edge_stroke_color(%{active: true}), do: "#3b82f6"
+  defp edge_stroke_color(_), do: "#8b5cf6"
+
+  defp edge_animation_class(%{active: true}), do: "graph-edge-active"
+  defp edge_animation_class(%{completed: true}), do: "graph-edge-completed"
+  defp edge_animation_class(_), do: ""
 end

@@ -21,10 +21,211 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import topbar from "../vendor/topbar"
 
+// ============================================================================
+// Workflow Graph Zoom/Pan Hook
+// ============================================================================
+const GraphZoomPan = {
+  mounted() {
+    this.zoom = 1
+    this.minZoom = 0.25
+    this.maxZoom = 3
+    this.panX = 0
+    this.panY = 0
+    this.isDragging = false
+    this.startX = 0
+    this.startY = 0
+    
+    this.svg = this.el.querySelector('svg')
+    this.viewport = this.el.querySelector('.graph-viewport')
+    
+    if (!this.svg) return
+    
+    // Mouse wheel zoom
+    this.el.addEventListener('wheel', (e) => {
+      e.preventDefault()
+      
+      const rect = this.el.getBoundingClientRect()
+      const mouseX = e.clientX - rect.left
+      const mouseY = e.clientY - rect.top
+      
+      const delta = e.deltaY > 0 ? -0.1 : 0.1
+      const newZoom = Math.min(this.maxZoom, Math.max(this.minZoom, this.zoom + delta))
+      
+      if (newZoom !== this.zoom) {
+        // Zoom towards mouse position
+        const scale = newZoom / this.zoom
+        this.panX = mouseX - (mouseX - this.panX) * scale
+        this.panY = mouseY - (mouseY - this.panY) * scale
+        this.zoom = newZoom
+        this.updateTransform()
+      }
+    }, { passive: false })
+    
+    // Pan with mouse drag
+    this.el.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return // Only left click
+      this.isDragging = true
+      this.startX = e.clientX - this.panX
+      this.startY = e.clientY - this.panY
+      this.el.classList.add('dragging')
+      if (this.viewport) this.viewport.classList.add('dragging')
+    })
+    
+    document.addEventListener('mousemove', (e) => {
+      if (!this.isDragging) return
+      this.panX = e.clientX - this.startX
+      this.panY = e.clientY - this.startY
+      this.updateTransform()
+    })
+    
+    document.addEventListener('mouseup', () => {
+      this.isDragging = false
+      this.el.classList.remove('dragging')
+      if (this.viewport) this.viewport.classList.remove('dragging')
+    })
+    
+    // Touch support for mobile
+    let lastTouchDistance = 0
+    
+    this.el.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) {
+        this.isDragging = true
+        this.startX = e.touches[0].clientX - this.panX
+        this.startY = e.touches[0].clientY - this.panY
+      } else if (e.touches.length === 2) {
+        lastTouchDistance = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        )
+      }
+    }, { passive: true })
+    
+    this.el.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 1 && this.isDragging) {
+        this.panX = e.touches[0].clientX - this.startX
+        this.panY = e.touches[0].clientY - this.startY
+        this.updateTransform()
+      } else if (e.touches.length === 2) {
+        const distance = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        )
+        const scale = distance / lastTouchDistance
+        this.zoom = Math.min(this.maxZoom, Math.max(this.minZoom, this.zoom * scale))
+        lastTouchDistance = distance
+        this.updateTransform()
+      }
+    }, { passive: true })
+    
+    this.el.addEventListener('touchend', () => {
+      this.isDragging = false
+    })
+    
+    // Zoom control buttons
+    this.handleEvent("zoom_in", () => {
+      this.zoom = Math.min(this.maxZoom, this.zoom + 0.25)
+      this.updateTransform()
+    })
+    
+    this.handleEvent("zoom_out", () => {
+      this.zoom = Math.max(this.minZoom, this.zoom - 0.25)
+      this.updateTransform()
+    })
+    
+    this.handleEvent("zoom_reset", () => {
+      this.zoom = 1
+      this.panX = 0
+      this.panY = 0
+      this.updateTransform()
+    })
+    
+    this.handleEvent("zoom_fit", () => {
+      this.fitToContainer()
+    })
+  },
+  
+  updateTransform() {
+    if (this.viewport) {
+      this.viewport.style.transform = `translate(${this.panX}px, ${this.panY}px) scale(${this.zoom})`
+    } else if (this.svg) {
+      this.svg.style.transform = `translate(${this.panX}px, ${this.panY}px) scale(${this.zoom})`
+    }
+    
+    // Update zoom level display
+    const zoomDisplay = this.el.querySelector('.zoom-level')
+    if (zoomDisplay) {
+      zoomDisplay.textContent = `${Math.round(this.zoom * 100)}%`
+    }
+  },
+  
+  fitToContainer() {
+    if (!this.svg) return
+    
+    const containerRect = this.el.getBoundingClientRect()
+    const svgRect = this.svg.getBBox ? this.svg.getBBox() : { width: 800, height: 200 }
+    
+    const scaleX = (containerRect.width - 40) / svgRect.width
+    const scaleY = (containerRect.height - 40) / svgRect.height
+    this.zoom = Math.min(scaleX, scaleY, 1)
+    
+    this.panX = (containerRect.width - svgRect.width * this.zoom) / 2
+    this.panY = (containerRect.height - svgRect.height * this.zoom) / 2
+    
+    this.updateTransform()
+  }
+}
+
+// ============================================================================
+// Node State Animation Hook
+// ============================================================================
+const NodeStateTracker = {
+  mounted() {
+    this.previousStates = new Map()
+    this.trackStates()
+  },
+  
+  updated() {
+    this.trackStates()
+  },
+  
+  trackStates() {
+    const nodes = this.el.querySelectorAll('[data-node-state]')
+    
+    nodes.forEach(node => {
+      const nodeId = node.dataset.nodeId
+      const currentState = node.dataset.nodeState
+      const previousState = this.previousStates.get(nodeId)
+      
+      if (previousState && previousState !== currentState) {
+        // State changed! Apply transition animation
+        node.classList.remove('graph-node-just-completed', 'graph-node-just-failed')
+        
+        if (currentState === 'completed' && previousState === 'running') {
+          node.classList.add('graph-node-just-completed')
+          // Remove animation class after it completes
+          setTimeout(() => node.classList.remove('graph-node-just-completed'), 800)
+        } else if (currentState === 'failed') {
+          node.classList.add('graph-node-just-failed')
+          setTimeout(() => node.classList.remove('graph-node-just-failed'), 600)
+        }
+      }
+      
+      this.previousStates.set(nodeId, currentState)
+    })
+  }
+}
+
+// Register hooks
+const Hooks = {
+  GraphZoomPan,
+  NodeStateTracker
+}
+
 let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 let liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
-  params: {_csrf_token: csrfToken}
+  params: {_csrf_token: csrfToken},
+  hooks: Hooks
 })
 
 // Show progress bar on live navigation and form submits
