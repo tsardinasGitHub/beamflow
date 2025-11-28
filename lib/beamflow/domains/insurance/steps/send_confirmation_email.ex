@@ -32,7 +32,7 @@ defmodule Beamflow.Domains.Insurance.Steps.SendConfirmationEmail do
   ## Diseño: Steps Atómicos vs Checkpoints
 
   Este step sigue el principio de **atomicidad**:
-  
+
   > "Un step = una operación atómica con un solo side-effect externo"
 
   Si necesitáramos enviar múltiples emails (ej: al cliente + al agente + al sistema),
@@ -146,7 +146,7 @@ defmodule Beamflow.Domains.Insurance.Steps.SendConfirmationEmail do
 
       Gracias por tu interés en BEAMFlow Seguros.
 
-      Lamentamos informarte que después de evaluar tu solicitud, 
+      Lamentamos informarte que después de evaluar tu solicitud,
       no podemos aprobarla en este momento.
 
       📋 Razón:
