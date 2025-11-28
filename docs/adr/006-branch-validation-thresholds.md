@@ -156,6 +156,93 @@ config :beamflow, :validation, pedantic_mode: true
 Graph.validate(graph, pedantic_mode: true)
 ```
 
+## Herramienta de Auditoría
+
+El comando `mix beamflow.audit` proporciona análisis estático de todos los workflows
+del proyecto, similar a lo que Credo hace para código Elixir:
+
+```bash
+# Auditoría básica
+$ mix beamflow.audit
+
+Beamflow Workflow Audit
+═══════════════════════
+
+Checking 3 workflows...
+
+✗ MyApp.OrderWorkflow
+  [E] Branch 'status_check' has 6 options without :default path
+
+⚠ MyApp.PaymentWorkflow
+  [W] Branch 'gateway_router' has 4 options (approaching threshold)
+
+✓ MyApp.NotificationWorkflow
+
+───────────────────────
+Summary: 1 error, 1 warning in 3 workflows
+```
+
+### Opciones de Línea de Comandos
+
+| Flag | Descripción | Umbral |
+|------|-------------|--------|
+| (ninguno) | Modo normal | 5 |
+| `--strict` | Modo estricto | 3 |
+| `--paranoid` | Modo paranoico | 2 |
+| `--pedantic` | Modo pedante | 1 |
+| `--format json` | Salida JSON para CI |
+| `--only-errors` | Solo errores, ignora warnings |
+| `--quiet` | Sin output, solo exit code |
+
+### Integración con CI/CD
+
+```yaml
+# .github/workflows/ci.yml
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.15'
+          otp-version: '26'
+      - run: mix deps.get
+      - run: mix beamflow.audit --strict
+        # Exit code 1 si hay errores → pipeline falla
+```
+
+### Salida JSON
+
+Para integración programática:
+
+```bash
+$ mix beamflow.audit --format json
+```
+
+```json
+{
+  "timestamp": "2025-11-28T17:45:00Z",
+  "summary": {
+    "workflow_count": 3,
+    "error_count": 1,
+    "warning_count": 1
+  },
+  "workflows": [
+    {
+      "module": "MyApp.OrderWorkflow",
+      "issues": [
+        {
+          "severity": "error",
+          "message": "Branch 'status_check' has 6 options without :default",
+          "node_id": "status_check"
+        }
+      ]
+    }
+  ]
+}
+```
+
 ## Consecuencias
 
 ### Positivas
@@ -223,6 +310,7 @@ end
 
 ## Changelog
 
+- 2025-11-28: Agregado `mix beamflow.audit` para auditoría de workflows
 - 2025-11-28: Agregado `pedantic_mode` (umbral 1) y `safe_branch/4`
 - 2025-11-28: Agregado `dispatch_branch` como mecanismo para branches grandes
 - 2025-11-28: Decisión inicial aceptada

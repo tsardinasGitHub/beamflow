@@ -98,5 +98,40 @@ Toggle the **"Enable Chaos Mode"** switch in the UI. You will see processes cras
 
 Run the test suite, which includes property-based testing for the engine logic:
 
-mix test## 📄 License
+```bash
+mix test
+```
+
+### Workflow Audit
+
+BEAMFlow includes a static analysis tool for workflows, similar to Credo:
+
+```bash
+# Basic audit
+mix beamflow.audit
+
+# Strict mode (reduced complexity thresholds)
+mix beamflow.audit --strict
+
+# Paranoid mode (for financial/healthcare domains)
+mix beamflow.audit --paranoid
+
+# Pedantic mode (any branch without :default is an error)
+mix beamflow.audit --pedantic
+
+# JSON output for CI integration
+mix beamflow.audit --format json
+```
+
+The audit checks for:
+- Branches without `:default` handlers (potential dead ends)
+- Excessive branch complexity (>5 options)
+- Unreachable nodes in the workflow graph
+- Invalid edge references
+
+Exit codes:
+- `0`: No errors (may have warnings)
+- `1`: One or more errors found
+
+## 📄 License
 MIT
