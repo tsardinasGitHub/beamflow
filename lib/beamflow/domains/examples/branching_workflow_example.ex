@@ -43,6 +43,17 @@ defmodule Beamflow.Domains.Examples.BranchingWorkflowExample do
 
   @doc """
   Define el grafo del workflow con branching basado en nivel de riesgo.
+
+  ## Manejo de Branches
+
+  El branch `risk_branch` evalúa `state.risk_level` y dirige el flujo:
+  - `:low` → Aprobación automática
+  - `:medium` → Revisión manual
+  - `:high` → Rechazo automático
+  - `:default` → Revisión manual (fallback si el nivel no es reconocido)
+
+  El path `:default` garantiza que el workflow nunca falle por un
+  valor inesperado de `risk_level`.
   """
   def graph do
     Graph.new()
@@ -67,6 +78,8 @@ defmodule Beamflow.Domains.Examples.BranchingWorkflowExample do
     |> Graph.connect_branch("risk_branch", "auto_approve", :low)
     |> Graph.connect_branch("risk_branch", "manual_review", :medium)
     |> Graph.connect_branch("risk_branch", "auto_reject", :high)
+    # Default path: si el risk_level no coincide con ninguno, va a manual_review
+    |> Graph.connect_branch("risk_branch", "manual_review", :default)
     # Edges - join
     |> Graph.connect("auto_approve", "join_paths")
     |> Graph.connect("manual_review", "join_paths")
@@ -74,6 +87,8 @@ defmodule Beamflow.Domains.Examples.BranchingWorkflowExample do
     |> Graph.connect("join_paths", "notify")
     # Final nodes
     |> Graph.set_end("notify")
+    # Validar estructura del grafo
+    |> Graph.validate!()
   end
 
   @doc """

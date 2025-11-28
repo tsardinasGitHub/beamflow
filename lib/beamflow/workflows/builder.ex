@@ -70,16 +70,25 @@ defmodule Beamflow.Workflows.Builder do
 
   Para workflows lineales: simplemente el siguiente índice.
   Para workflows con branching: evalúa condiciones para determinar el path.
-  """
-  @spec get_next_step(Graph.t(), String.t(), map()) :: {:ok, Graph.graph_node()} | :end | {:error, term()}
-  def get_next_step(graph, current_node_id, workflow_state) do
-    next_nodes = Graph.next_nodes(graph, current_node_id, workflow_state)
 
-    case next_nodes do
-      [] ->
+  ## Retorno
+
+    * `{:ok, node}` - Siguiente nodo a ejecutar
+    * `:end` - No hay más nodos (workflow completo)
+    * `{:error, :no_matching_branch}` - Branch sin condición que coincida ni default
+    * `{:error, reason}` - Otro error
+  """
+  @spec get_next_step(Graph.t(), String.t(), map()) ::
+          {:ok, Graph.graph_node()} | :end | {:error, term()}
+  def get_next_step(graph, current_node_id, workflow_state) do
+    case Graph.next_nodes(graph, current_node_id, workflow_state) do
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, []} ->
         :end
 
-      [next_id] ->
+      {:ok, [next_id]} ->
         node = Graph.get_node(graph, next_id)
 
         case node.type do
@@ -98,7 +107,7 @@ defmodule Beamflow.Workflows.Builder do
             {:error, :unknown_node_type}
         end
 
-      multiple when is_list(multiple) ->
+      {:ok, multiple} when is_list(multiple) ->
         # Múltiples siguientes (error en diseño o paralelo futuro)
         {:error, {:multiple_next_nodes, multiple}}
     end
@@ -129,13 +138,17 @@ defmodule Beamflow.Workflows.Builder do
   # ============================================================================
 
   defp evaluate_branch_and_continue(graph, branch_node, workflow_state) do
-    next_nodes = Graph.next_nodes(graph, branch_node.id, workflow_state)
-
-    case next_nodes do
-      [] ->
+    case Graph.next_nodes(graph, branch_node.id, workflow_state) do
+      {:error, :no_matching_branch} ->
         {:error, {:no_branch_path_matched, branch_node.id}}
 
-      [next_id] ->
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, []} ->
+        {:error, {:no_branch_path_matched, branch_node.id}}
+
+      {:ok, [next_id]} ->
         node = Graph.get_node(graph, next_id)
 
         case node.type do
@@ -145,7 +158,7 @@ defmodule Beamflow.Workflows.Builder do
           _ -> {:error, :unknown_node_type}
         end
 
-      _ ->
+      {:ok, _multiple} ->
         {:error, :multiple_branch_paths}
     end
   end

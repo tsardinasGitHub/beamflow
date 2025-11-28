@@ -305,10 +305,8 @@ defmodule Beamflow.Engine.WorkflowActor do
     %{graph: graph, workflow_state: workflow_state, workflow_id: workflow_id} = state
 
     # Evaluar la condición del branch
-    next_nodes = Graph.next_nodes(graph, branch_node.id, workflow_state)
-
-    case next_nodes do
-      [next_node_id] ->
+    case Graph.next_nodes(graph, branch_node.id, workflow_state) do
+      {:ok, [next_node_id]} ->
         Logger.info("Workflow #{workflow_id}: Branch #{branch_node.id} -> #{next_node_id}")
 
         record_event(workflow_id, :branch_taken, %{
@@ -319,31 +317,36 @@ defmodule Beamflow.Engine.WorkflowActor do
         new_state = %{state | current_node_id: next_node_id}
         {:noreply, new_state, {:continue, :execute_next_step}}
 
-      [] ->
+      {:ok, []} ->
         Logger.error("Workflow #{workflow_id}: No branch path matched for #{branch_node.id}")
         {:noreply, %{state | status: :failed, error: {:no_branch_match, branch_node.id}}}
 
-      multiple ->
+      {:ok, multiple} ->
         Logger.error("Workflow #{workflow_id}: Multiple branch paths matched: #{inspect(multiple)}")
         {:noreply, %{state | status: :failed, error: {:multiple_branch_match, multiple}}}
+
+      {:error, :no_matching_branch} ->
+        Logger.error("Workflow #{workflow_id}: No branch condition matched for #{branch_node.id} and no default path defined")
+        {:noreply, %{state | status: :failed, error: {:no_branch_match, branch_node.id}}}
     end
   end
 
   defp advance_to_next_node(state) do
     %{graph: graph, current_node_id: current_node_id, workflow_state: workflow_state} = state
 
-    next_nodes = Graph.next_nodes(graph, current_node_id, workflow_state)
-
-    case next_nodes do
-      [next_node_id] ->
+    case Graph.next_nodes(graph, current_node_id, workflow_state) do
+      {:ok, [next_node_id]} ->
         new_state = %{state | current_node_id: next_node_id}
         {:noreply, new_state, {:continue, :execute_next_step}}
 
-      [] ->
+      {:ok, []} ->
         complete_workflow(state)
 
-      _ ->
+      {:ok, _multiple} ->
         {:noreply, %{state | status: :failed, error: :ambiguous_next_node}}
+
+      {:error, :no_matching_branch} ->
+        {:noreply, %{state | status: :failed, error: :no_matching_branch}}
     end
   end
 
@@ -496,13 +499,13 @@ defmodule Beamflow.Engine.WorkflowActor do
       workflow_module.handle_step_success(step_module, updated_workflow_state)
 
     # Obtener siguiente nodo del grafo
-    next_nodes = Graph.next_nodes(graph, current_node_id, new_workflow_state)
-
-    next_node_id = case next_nodes do
-      [next_id] -> next_id
-      [] -> nil
-      _ -> nil  # Múltiples paths - error
-    end
+    next_node_id =
+      case Graph.next_nodes(graph, current_node_id, new_workflow_state) do
+        {:ok, [next_id]} -> next_id
+        {:ok, []} -> nil
+        {:ok, _multiple} -> nil  # Múltiples paths - error, se manejara al continuar
+        {:error, _} -> nil
+      end
 
     new_state = %{state |
       workflow_state: new_workflow_state,
