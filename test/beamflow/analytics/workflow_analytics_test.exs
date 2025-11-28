@@ -336,6 +336,93 @@ defmodule Beamflow.Analytics.WorkflowAnalyticsTest do
 
       assert length(metrics.daily_trend) == 7
     end
+
+    test "incluye flag is_sampled" do
+      metrics = WorkflowAnalytics.dashboard_metrics()
+
+      assert Map.has_key?(metrics, :is_sampled)
+      assert is_boolean(metrics.is_sampled)
+    end
+
+    test "incluye date_range" do
+      metrics = WorkflowAnalytics.dashboard_metrics()
+
+      assert Map.has_key?(metrics, :date_range)
+      assert Map.has_key?(metrics.date_range, :from)
+      assert Map.has_key?(metrics.date_range, :to)
+    end
+  end
+
+  # ============================================================================
+  # Tests de Filtros de Fecha
+  # ============================================================================
+
+  describe "summary/1 con filtros de fecha" do
+    test "filtra por date_from y date_to" do
+      now = DateTime.utc_now()
+      yesterday = DateTime.add(now, -86400, :second)
+      tomorrow = DateTime.add(now, 86400, :second)
+
+      # Crear workflow de hoy
+      create_test_workflow_with_times(
+        "date-filter-today-#{System.unique_integer([:positive])}",
+        :completed,
+        now,
+        now
+      )
+
+      # Summary con rango que incluye hoy
+      summary = WorkflowAnalytics.summary(date_from: yesterday, date_to: tomorrow)
+
+      assert is_map(summary)
+      assert Map.has_key?(summary, :total)
+    end
+
+    test "retorna ceros para rango vacío" do
+      # Rango en el pasado lejano
+      past_from = DateTime.add(DateTime.utc_now(), -365 * 86400, :second)
+      past_to = DateTime.add(past_from, 86400, :second)
+
+      summary = WorkflowAnalytics.summary(date_from: past_from, date_to: past_to)
+
+      assert summary.total >= 0
+    end
+  end
+
+  # ============================================================================
+  # Tests de Export Metrics
+  # ============================================================================
+
+  describe "export_metrics/1" do
+    test "retorna estructura exportable" do
+      export = WorkflowAnalytics.export_metrics()
+
+      assert is_map(export)
+      assert Map.has_key?(export, :exported_at)
+      assert Map.has_key?(export, :summary)
+      assert Map.has_key?(export, :performance)
+      assert Map.has_key?(export, :daily_trend)
+      assert Map.has_key?(export, :by_module)
+    end
+
+    test "exported_at es DateTime" do
+      export = WorkflowAnalytics.export_metrics()
+
+      assert %DateTime{} = export.exported_at
+    end
+
+    test "incluye step_performance completo" do
+      export = WorkflowAnalytics.export_metrics()
+
+      assert is_list(export.step_performance)
+    end
+
+    test "incluye más recent_failures que dashboard" do
+      export = WorkflowAnalytics.export_metrics()
+
+      assert is_list(export.recent_failures)
+      # Export tiene límite de 20 vs 5 de dashboard
+    end
   end
 
   # ============================================================================

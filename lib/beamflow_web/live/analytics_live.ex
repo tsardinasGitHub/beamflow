@@ -33,6 +33,8 @@ defmodule BeamflowWeb.AnalyticsLive do
       |> assign(page_title: "Analytics")
       |> assign(loading: true)
       |> assign(last_updated: DateTime.utc_now())
+      |> assign(filter_range: :all)
+      |> assign(is_sampled: false)
       |> load_all_metrics()
 
     {:ok, socket}
@@ -62,9 +64,63 @@ defmodule BeamflowWeb.AnalyticsLive do
   end
 
   @impl true
+  def handle_event("filter", %{"range" => range}, socket) do
+    filter_range = String.to_existing_atom(range)
+    socket = socket |> assign(filter_range: filter_range) |> load_all_metrics()
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("export", %{"format" => format}, socket) do
+    format_atom = String.to_existing_atom(format)
+    opts = build_filter_opts(socket.assigns.filter_range)
+
+    data = WorkflowAnalytics.export_metrics(opts)
+    content = format_export(data, format_atom)
+
+    filename = "beamflow_analytics_#{Date.utc_today()}.#{format}"
+
+    {:noreply, push_event(socket, "download", %{content: content, filename: filename, mime: mime_type(format_atom)})}
+  end
+
+  defp format_export(data, :json), do: Jason.encode!(data, pretty: true)
+  defp format_export(data, :csv) do
+    # CSV del summary
+    summary_csv = "Metric,Value\n" <>
+      Enum.map_join(data.summary, "\n", fn {k, v} -> "#{k},#{v}" end)
+
+    # CSV de performance
+    perf_csv = "\n\nPerformance Metric,Value\n" <>
+      Enum.map_join(data.performance, "\n", fn {k, v} -> "#{k},#{v}" end)
+
+    summary_csv <> perf_csv
+  end
+
+  defp mime_type(:json), do: "application/json"
+  defp mime_type(:csv), do: "text/csv"
+
+  defp build_filter_opts(:all), do: []
+  defp build_filter_opts(:today) do
+    now = DateTime.utc_now()
+    date_from = now |> DateTime.to_date() |> DateTime.new!(~T[00:00:00])
+    date_to = DateTime.add(date_from, 86400, :second)
+    [date_from: date_from, date_to: date_to]
+  end
+  defp build_filter_opts(:week) do
+    now = DateTime.utc_now()
+    date_from = DateTime.add(now, -7 * 86400, :second)
+    [date_from: date_from, date_to: now]
+  end
+  defp build_filter_opts(:month) do
+    now = DateTime.utc_now()
+    date_from = DateTime.add(now, -30 * 86400, :second)
+    [date_from: date_from, date_to: now]
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
-    <div class="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
+    <div class="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900" id="analytics-container" phx-hook="DownloadHook">
       <!-- Header -->
       <header class="border-b border-slate-700/50 bg-slate-900/50 backdrop-blur-sm sticky top-0 z-10">
         <div class="max-w-7xl mx-auto px-6 py-4">
@@ -83,6 +139,64 @@ defmodule BeamflowWeb.AnalyticsLive do
             </div>
 
             <div class="flex items-center gap-4">
+              <!-- Filter Controls -->
+              <div class="flex items-center gap-2 bg-slate-800 rounded-lg p-1">
+                <button
+                  phx-click="filter"
+                  phx-value-range="all"
+                  class={"px-3 py-1.5 rounded text-sm transition-colors " <>
+                    if(@filter_range == :all, do: "bg-blue-600 text-white", else: "text-slate-400 hover:text-white")}
+                >
+                  Todo
+                </button>
+                <button
+                  phx-click="filter"
+                  phx-value-range="today"
+                  class={"px-3 py-1.5 rounded text-sm transition-colors " <>
+                    if(@filter_range == :today, do: "bg-blue-600 text-white", else: "text-slate-400 hover:text-white")}
+                >
+                  Hoy
+                </button>
+                <button
+                  phx-click="filter"
+                  phx-value-range="week"
+                  class={"px-3 py-1.5 rounded text-sm transition-colors " <>
+                    if(@filter_range == :week, do: "bg-blue-600 text-white", else: "text-slate-400 hover:text-white")}
+                >
+                  Semana
+                </button>
+                <button
+                  phx-click="filter"
+                  phx-value-range="month"
+                  class={"px-3 py-1.5 rounded text-sm transition-colors " <>
+                    if(@filter_range == :month, do: "bg-blue-600 text-white", else: "text-slate-400 hover:text-white")}
+                >
+                  Mes
+                </button>
+              </div>
+
+              <div class="h-6 w-px bg-slate-700"></div>
+
+              <!-- Export Controls -->
+              <div class="flex items-center gap-2">
+                <button
+                  phx-click="export"
+                  phx-value-format="json"
+                  class="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg transition-colors flex items-center gap-2 text-sm"
+                >
+                  <span>📄</span> JSON
+                </button>
+                <button
+                  phx-click="export"
+                  phx-value-format="csv"
+                  class="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg transition-colors flex items-center gap-2 text-sm"
+                >
+                  <span>📊</span> CSV
+                </button>
+              </div>
+
+              <div class="h-6 w-px bg-slate-700"></div>
+
               <span class="text-sm text-slate-500">
                 Actualizado: <%= format_time(@last_updated) %>
               </span>
@@ -99,6 +213,17 @@ defmodule BeamflowWeb.AnalyticsLive do
       </header>
 
       <main class="max-w-7xl mx-auto px-6 py-8 space-y-8">
+        <!-- Sampling Warning -->
+        <%= if @is_sampled do %>
+          <div class="bg-amber-900/30 border border-amber-600/30 rounded-lg p-4 flex items-center gap-3">
+            <span class="text-2xl">⚠️</span>
+            <div>
+              <p class="text-amber-200 font-medium">Datos muestreados</p>
+              <p class="text-amber-300/70 text-sm">Las métricas se calculan sobre una muestra representativa para optimizar el rendimiento.</p>
+            </div>
+          </div>
+        <% end %>
+
         <!-- KPIs Row -->
         <section>
           <h2 class="text-lg font-semibold text-slate-300 mb-4">📊 Resumen General</h2>
@@ -486,11 +611,15 @@ defmodule BeamflowWeb.AnalyticsLive do
   # ============================================================================
 
   defp load_all_metrics(socket) do
-    metrics = WorkflowAnalytics.dashboard_metrics()
+    filter_range = socket.assigns[:filter_range] || :all
+    opts = build_filter_opts(filter_range)
+
+    metrics = WorkflowAnalytics.dashboard_metrics(opts)
 
     socket
     |> assign(loading: false)
     |> assign(last_updated: DateTime.utc_now())
+    |> assign(is_sampled: Map.get(metrics, :is_sampled, false))
     |> assign(summary: metrics.summary)
     |> assign(performance: metrics.performance)
     |> assign(hourly_trend: metrics.hourly_trend)

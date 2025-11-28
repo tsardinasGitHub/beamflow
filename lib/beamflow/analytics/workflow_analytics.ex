@@ -24,6 +24,25 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
 
   alias Beamflow.Storage.WorkflowStore
 
+  # Límite de muestreo para evitar timeouts con grandes volúmenes
+  @max_sample_size 1000
+  @max_workflows_scan 500
+
+  # ============================================================================
+  # Funciones de Muestreo
+  # ============================================================================
+
+  @doc false
+  defp maybe_sample(list) when length(list) <= @max_sample_size do
+    Process.put(:analytics_sampled, false)
+    list
+  end
+
+  defp maybe_sample(list) do
+    Process.put(:analytics_sampled, true)
+    list |> Enum.shuffle() |> Enum.take(@max_sample_size)
+  end
+
   # ============================================================================
   # Resumen General
   # ============================================================================
@@ -32,10 +51,22 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
   Calcula un resumen general de todos los workflows.
 
   Retorna conteos por estado y tasas de éxito/fallo.
+
+  ## Opciones
+
+  - `:date_from` - Fecha inicial (DateTime)
+  - `:date_to` - Fecha final (DateTime)
   """
-  @spec summary() :: map()
-  def summary do
-    stats = WorkflowStore.count_by_status()
+  @spec summary(keyword()) :: map()
+  def summary(opts \\ []) do
+    date_from = Keyword.get(opts, :date_from)
+    date_to = Keyword.get(opts, :date_to)
+
+    stats = if date_from || date_to do
+      count_by_status_in_range(date_from, date_to)
+    else
+      WorkflowStore.count_by_status()
+    end
 
     total = stats.completed + stats.failed + stats.running + stats.pending
     success_rate = if total > 0, do: Float.round(stats.completed / total, 2), else: 0.0
@@ -153,7 +184,6 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
   """
   @spec daily_trend() :: [map()]
   def daily_trend do
-    now = DateTime.utc_now()
     today_start = DateTime.new!(Date.utc_today(), ~T[00:00:00], "Etc/UTC")
 
     0..6
@@ -243,18 +273,49 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
   @doc """
   Retorna todas las métricas agregadas para el dashboard.
 
+  ## Opciones
+
+  - `:date_from` - Fecha inicial (DateTime)
+  - `:date_to` - Fecha final (DateTime)
+  - `:period` - Preset: :today, :week, :month, :all (default)
+
   Esta función es útil para cargar todo de una vez en el LiveView.
   """
-  @spec dashboard_metrics() :: map()
-  def dashboard_metrics do
+  @spec dashboard_metrics(keyword()) :: map()
+  def dashboard_metrics(opts \\ []) do
+    {date_from, date_to} = resolve_date_range(opts)
+    filter_opts = [date_from: date_from, date_to: date_to]
+
     %{
-      summary: summary(),
+      summary: summary(filter_opts),
       performance: performance_metrics(),
       hourly_trend: hourly_trend(),
       daily_trend: daily_trend(),
       by_module: by_module(),
       step_performance: step_performance() |> Enum.take(10),
-      recent_failures: recent_failures(limit: 5)
+      recent_failures: recent_failures(limit: 5),
+      is_sampled: is_sampled?(),
+      sample_size: @max_sample_size,
+      date_range: %{from: date_from, to: date_to}
+    }
+  end
+
+  @doc """
+  Exporta métricas en formato estructurado para JSON/CSV.
+  """
+  @spec export_metrics(keyword()) :: map()
+  def export_metrics(opts \\ []) do
+    metrics = dashboard_metrics(opts)
+
+    %{
+      exported_at: DateTime.utc_now(),
+      period: Keyword.get(opts, :period, :all),
+      summary: metrics.summary,
+      performance: metrics.performance,
+      daily_trend: metrics.daily_trend,
+      by_module: metrics.by_module,
+      step_performance: step_performance(),
+      recent_failures: recent_failures(limit: 20)
     }
   end
 
@@ -262,8 +323,65 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
   # Private Functions
   # ============================================================================
 
+  defp resolve_date_range(opts) do
+    case Keyword.get(opts, :period) do
+      :today ->
+        today = Date.utc_today()
+        {DateTime.new!(today, ~T[00:00:00], "Etc/UTC"), DateTime.utc_now()}
+
+      :week ->
+        now = DateTime.utc_now()
+        {DateTime.add(now, -7, :day), now}
+
+      :month ->
+        now = DateTime.utc_now()
+        {DateTime.add(now, -30, :day), now}
+
+      _ ->
+        {Keyword.get(opts, :date_from), Keyword.get(opts, :date_to)}
+    end
+  end
+
+  defp is_sampled? do
+    # Verificar si el último cálculo usó sampling
+    Process.get(:analytics_sampled, false)
+  end
+
+  defp count_by_status_in_range(date_from, date_to) do
+    case WorkflowStore.list_workflows(limit: @max_workflows_scan) do
+      {:ok, workflows} ->
+        filtered = filter_by_date_range(workflows, date_from, date_to)
+
+        %{
+          completed: Enum.count(filtered, &(Map.get(&1, :status) == :completed)),
+          failed: Enum.count(filtered, &(Map.get(&1, :status) == :failed)),
+          running: Enum.count(filtered, &(Map.get(&1, :status) == :running)),
+          pending: Enum.count(filtered, &(Map.get(&1, :status) == :pending))
+        }
+
+      _ ->
+        %{completed: 0, failed: 0, running: 0, pending: 0}
+    end
+  end
+
+  defp filter_by_date_range(workflows, nil, nil), do: workflows
+  defp filter_by_date_range(workflows, date_from, date_to) do
+    Enum.filter(workflows, fn wf ->
+      started = Map.get(wf, :started_at)
+      in_range?(started, date_from, date_to)
+    end)
+  end
+
+  defp in_range?(nil, _, _), do: false
+  defp in_range?(dt, nil, nil), do: dt != nil
+  defp in_range?(dt, from, nil), do: DateTime.compare(dt, from) in [:gt, :eq]
+  defp in_range?(dt, nil, to), do: DateTime.compare(dt, to) == :lt
+  defp in_range?(dt, from, to) do
+    DateTime.compare(dt, from) in [:gt, :eq] && DateTime.compare(dt, to) == :lt
+  end
+
   defp get_completed_durations do
-    case WorkflowStore.list_workflows(status: :completed, limit: 500) do
+    case WorkflowStore.list_workflows(status: :completed, limit: @max_workflows_scan) do
       {:ok, workflows} ->
         workflows
         |> Enum.filter(fn wf ->
@@ -280,20 +398,24 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
   end
 
   defp get_all_step_events do
-    case WorkflowStore.list_workflows(limit: 200) do
+    case WorkflowStore.list_workflows(limit: @max_workflows_scan) do
       {:ok, workflows} ->
-        workflows
-        |> Enum.flat_map(fn wf ->
-          workflow_id = Map.get(wf, :workflow_id) || Map.get(wf, :id)
-          case WorkflowStore.get_events(workflow_id) do
-            {:ok, events} ->
-              events
-              |> Enum.filter(&(&1.event_type in [:step_completed, :step_failed]))
+        events =
+          workflows
+          |> Enum.flat_map(fn wf ->
+            workflow_id = Map.get(wf, :workflow_id) || Map.get(wf, :id)
+            case WorkflowStore.get_events(workflow_id) do
+              {:ok, evts} ->
+                evts
+                |> Enum.filter(&(&1.event_type in [:step_completed, :step_failed]))
 
-            _ ->
-              []
-          end
-        end)
+              _ ->
+                []
+            end
+          end)
+
+        # Aplicar sampling si hay demasiados eventos
+        maybe_sample(events)
 
       _ ->
         []

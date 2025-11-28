@@ -267,10 +267,31 @@ const NodeStateTracker = {
   }
 }
 
+// ============================================================================
+// Download Hook for Analytics Export
+// ============================================================================
+const DownloadHook = {
+  mounted() {
+    this.handleEvent("download", ({content, filename, mime}) => {
+      const blob = new Blob([content], {type: mime})
+      const url = URL.createObjectURL(blob)
+      
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+    })
+  }
+}
+
 // Register hooks
 const Hooks = {
   GraphZoomPan,
-  NodeStateTracker
+  NodeStateTracker,
+  DownloadHook
 }
 
 let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
