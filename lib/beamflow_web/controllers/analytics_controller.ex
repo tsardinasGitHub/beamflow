@@ -1,27 +1,42 @@
 defmodule BeamflowWeb.AnalyticsController do
   @moduledoc """
-  API REST Controller para exportación programática de analytics.
+  API REST Controller para analytics de workflows.
 
   ## Endpoints
 
-  - `GET /api/analytics/export` - Exporta métricas en JSON o CSV
+  - `GET /api/analytics/export` - Exporta métricas completas en JSON o CSV
+  - `GET /api/analytics/summary` - Solo KPIs principales (ligero)
+  - `GET /api/analytics/trends` - Datos para gráficos y visualizaciones
 
-  ## Parámetros
+  ## Parámetros Comunes
 
-  - `format` - Formato de salida: "json" (default) o "csv"
   - `period` - Período: "today", "week", "month", "all" (default)
   - `date_from` - Fecha inicial ISO8601 (opcional)
   - `date_to` - Fecha final ISO8601 (opcional)
 
-  ## Ejemplo de Uso
+  ## Parámetros Específicos
 
-      curl "http://localhost:4000/api/analytics/export?format=json&period=week"
+  ### /export
+  - `format` - Formato de salida: "json" (default) o "csv"
 
-      curl "http://localhost:4000/api/analytics/export?format=csv&date_from=2025-11-01&date_to=2025-11-28"
+  ### /trends
+  - `include` - Datos a incluir: "daily,hourly,heatmap,sparklines" (comma-separated)
+
+  ## Ejemplos de Uso
+
+      # Exportar todo en JSON
+      curl "http://localhost:4000/api/analytics/export?period=week"
+
+      # Solo KPIs (muy rápido)
+      curl "http://localhost:4000/api/analytics/summary"
+
+      # Datos para gráficos
+      curl "http://localhost:4000/api/analytics/trends?include=daily,sparklines"
 
   ## Rate Limiting
 
-  Se recomienda implementar rate limiting en producción para evitar abuso.
+  Límite: 60 requests por minuto por IP.
+  Headers de respuesta: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
   """
 
   use BeamflowWeb, :controller
@@ -114,5 +129,167 @@ defmodule BeamflowWeb.AnalyticsController do
       end)
 
     disclaimer <> summary_csv <> perf_csv <> daily_csv <> module_csv
+  end
+
+  # ============================================================================
+  # Summary Endpoint - Solo KPIs (ligero)
+  # ============================================================================
+
+  @doc """
+  Retorna solo los KPIs principales.
+
+  Endpoint optimizado para dashboards externos que solo necesitan métricas clave.
+  Mucho más rápido que /export porque no calcula tendencias ni datos por módulo.
+  """
+  @spec summary(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def summary(conn, params) do
+    opts = build_export_opts(params)
+    metrics = WorkflowAnalytics.dashboard_metrics(opts)
+    summary_data = metrics.summary
+    performance = metrics.performance
+
+    summary = %{
+      total_workflows: summary_data.total,
+      completed: summary_data.completed,
+      failed: summary_data.failed,
+      in_progress: summary_data.running,
+      pending: summary_data.pending,
+      success_rate: summary_data.success_rate,
+      failure_rate: summary_data.failure_rate,
+      avg_duration_ms: performance.avg_duration_ms,
+      period: period_from_opts(opts),
+      generated_at: DateTime.utc_now()
+    }
+
+    json(conn, summary)
+  end
+
+  # ============================================================================
+  # Trends Endpoint - Datos para gráficos
+  # ============================================================================
+
+  @doc """
+  Retorna datos optimizados para visualizaciones y gráficos.
+
+  Parámetro `include` permite seleccionar qué datos incluir:
+  - `daily` - Tendencia diaria (últimos 7 días)
+  - `hourly` - Distribución por hora del día
+  - `heatmap` - Datos para heatmap semanal
+  - `sparklines` - Mini gráficos para KPIs
+
+  Ejemplo: `?include=daily,sparklines`
+  """
+  @spec trends(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def trends(conn, params) do
+    opts = build_export_opts(params)
+    include = parse_include_param(Map.get(params, "include", "daily,sparklines"))
+
+    trends = %{
+      period: period_from_opts(opts),
+      generated_at: DateTime.utc_now()
+    }
+
+    trends = if "daily" in include do
+      daily = WorkflowAnalytics.daily_trend()
+      Map.put(trends, :daily, format_daily_trend(daily))
+    else
+      trends
+    end
+
+    trends = if "hourly" in include do
+      hourly = WorkflowAnalytics.hourly_distribution()
+      Map.put(trends, :hourly, hourly)
+    else
+      trends
+    end
+
+    trends = if "heatmap" in include do
+      heatmap = WorkflowAnalytics.weekly_heatmap()
+      Map.put(trends, :heatmap, format_heatmap(heatmap))
+    else
+      trends
+    end
+
+    trends = if "sparklines" in include do
+      sparklines = WorkflowAnalytics.adaptive_sparklines(opts)
+      Map.put(trends, :sparklines, sparklines)
+    else
+      trends
+    end
+
+    json(conn, trends)
+  end
+
+  # ============================================================================
+  # Health Check Endpoint
+  # ============================================================================
+
+  @doc """
+  Health check simple para monitoreo.
+  No cuenta contra el rate limit.
+  """
+  @spec health(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def health(conn, _params) do
+    json(conn, %{
+      status: "ok",
+      service: "beamflow_analytics",
+      timestamp: DateTime.utc_now()
+    })
+  end
+
+  # ============================================================================
+  # Private Helpers
+  # ============================================================================
+
+  defp parse_include_param(include_str) when is_binary(include_str) do
+    include_str
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.filter(&(&1 != ""))
+  end
+
+  defp period_from_opts(opts) do
+    cond do
+      opts[:date_from] && opts[:date_to] ->
+        %{
+          type: "custom",
+          from: opts[:date_from],
+          to: opts[:date_to]
+        }
+
+      opts[:period] ->
+        %{type: to_string(opts[:period])}
+
+      true ->
+        %{type: "all"}
+    end
+  end
+
+  defp format_daily_trend(daily) do
+    Enum.map(daily, fn day ->
+      %{
+        date: day.label,
+        completed: day.completed,
+        failed: day.failed,
+        total: day.total,
+        success_rate: if(day.total > 0, do: Float.round(day.completed / day.total * 100, 1), else: 0.0)
+      }
+    end)
+  end
+
+  defp format_heatmap(heatmap) do
+    day_names = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"]
+
+    Enum.map(heatmap, fn day ->
+      day_of_week = day.day
+      %{
+        date: to_string(day.date),
+        week: day.week,
+        day_of_week: day_of_week,
+        day_name: Enum.at(day_names, day_of_week, ""),
+        count: day.count,
+        level: day.intensity
+      }
+    end)
   end
 end

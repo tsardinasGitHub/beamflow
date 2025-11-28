@@ -269,7 +269,7 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
   Retorna mapa con sparklines para completed, failed, total.
   """
   @spec adaptive_sparklines(integer(), atom()) :: map()
-  def adaptive_sparklines(count, unit \\ :hour) do
+  def adaptive_sparklines(count, unit) when is_integer(count) and is_atom(unit) do
     now = DateTime.utc_now()
 
     data = case unit do
@@ -299,6 +299,90 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
       failed: Enum.map(data, & &1.failed),
       total: Enum.map(data, & &1.total)
     }
+  end
+
+  @doc """
+  Genera sparklines adaptativos basados en opciones de filtro.
+
+  Detecta automáticamente el período y ajusta la granularidad:
+  - `:today` → 6 horas
+  - `:week` → 7 días
+  - `:month` → 30 días
+  - `:all` → 30 días
+  """
+  @spec adaptive_sparklines(keyword()) :: map()
+  def adaptive_sparklines(opts) when is_list(opts) do
+    case Keyword.get(opts, :period, :all) do
+      :today -> adaptive_sparklines(6, :hour)
+      :week -> adaptive_sparklines(7, :day)
+      :month -> adaptive_sparklines(30, :day)
+      _ -> adaptive_sparklines(30, :day)
+    end
+  end
+
+  @doc """
+  Distribución de workflows por hora del día (0-23).
+
+  Útil para identificar horas pico de actividad.
+  """
+  @spec hourly_distribution() :: [map()]
+  def hourly_distribution do
+    # Obtener workflows de los últimos 7 días para tener buena muestra
+    now = DateTime.utc_now()
+    week_ago = DateTime.add(now, -7 * 86400, :second)
+
+    case WorkflowStore.list_workflows(limit: @max_workflows_scan) do
+      {:ok, workflows} ->
+        workflows
+        |> Enum.filter(fn wf ->
+          case Map.get(wf, :started_at) do
+            nil -> false
+            started_at -> DateTime.compare(started_at, week_ago) in [:gt, :eq]
+          end
+        end)
+        |> Enum.group_by(fn wf ->
+          wf
+          |> Map.get(:started_at)
+          |> DateTime.to_time()
+          |> Map.get(:hour)
+        end)
+        |> Enum.map(fn {hour, wfs} ->
+          completed = Enum.count(wfs, &(Map.get(&1, :status) == :completed))
+          failed = Enum.count(wfs, &(Map.get(&1, :status) == :failed))
+
+          %{
+            hour: hour,
+            label: format_hour_label(hour),
+            total: length(wfs),
+            completed: completed,
+            failed: failed
+          }
+        end)
+        |> Enum.sort_by(& &1.hour)
+        |> fill_missing_hours()
+
+      _ ->
+        fill_missing_hours([])
+    end
+  end
+
+  defp format_hour_label(hour) do
+    String.pad_leading("#{hour}", 2, "0") <> ":00"
+  end
+
+  defp fill_missing_hours(data) do
+    existing = Map.new(data, fn d -> {d.hour, d} end)
+
+    0..23
+    |> Enum.map(fn hour ->
+      Map.get(existing, hour, %{
+        hour: hour,
+        label: format_hour_label(hour),
+        total: 0,
+        completed: 0,
+        failed: 0
+      })
+    end)
   end
 
   defp get_daily_counts(days) do

@@ -14,6 +14,12 @@ defmodule BeamflowWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # Pipeline para API con rate limiting
+  pipeline :api_rate_limited do
+    plug :accepts, ["json"]
+    plug BeamflowWeb.Plugs.RateLimiter, max_requests: 60, window_ms: 60_000
+  end
+
   scope "/", BeamflowWeb do
     pipe_through :browser
 
@@ -35,11 +41,20 @@ defmodule BeamflowWeb.Router do
     live "/analytics", AnalyticsLive
   end
 
-  # API REST para exportación programática
+  # API REST para exportación programática (con rate limiting)
+  scope "/api/analytics", BeamflowWeb do
+    pipe_through :api_rate_limited
+
+    get "/export", AnalyticsController, :export
+    get "/summary", AnalyticsController, :summary
+    get "/trends", AnalyticsController, :trends
+  end
+
+  # Health check (sin rate limiting)
   scope "/api", BeamflowWeb do
     pipe_through :api
 
-    get "/analytics/export", AnalyticsController, :export
+    get "/health", AnalyticsController, :health
   end
 
   # Enable LiveDashboard only for development
