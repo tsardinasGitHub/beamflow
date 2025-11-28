@@ -4,13 +4,47 @@
 
 [![Elixir](https://img.shields.io/badge/Elixir-1.15-purple.svg)](https://elixir-lang.org/)
 [![Phoenix](https://img.shields.io/badge/Phoenix-LiveView-orange.svg)](https://www.phoenixframework.org/)
+[![Tests](https://img.shields.io/badge/Tests-334%20passing-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## 📖 Introduction
 
 **BEAMFlow** is a showcase project demonstrating how to build a **resilient, self-healing distributed system** on the BEAM (Erlang VM). Unlike traditional workflow engines that rely on external databases (Postgres/Redis) for state, BEAMFlow leverages **OTP Actors (GenServer)** for execution and **Mnesia** for real-time distributed persistence.
 
-It includes a **"Chaos Mode"** that intentionally kills processes to demonstrate the supervision tree's ability to recover state and resume workflows without data loss.
+### ✨ Key Features
+
+| Feature | Description |
+|---------|-------------|
+| 🔄 **Auto-recovery** | Processes that crash restart automatically via supervision trees |
+| 📊 **Real-time Dashboard** | LiveView UI updates instantly without page refresh |
+| 🎯 **Saga Pattern** | Automatic compensations when something fails |
+| 💥 **Chaos Engineering** | Built-in fault injection to test resilience |
+| 🎬 **Visual Debugger** | "Rewind" workflows to see exactly what happened |
+| 📈 **Analytics** | KPIs, trends, and data export (CSV/JSON) |
+
+---
+
+## 🖥️ Dashboard
+
+BEAMFlow includes a comprehensive visual dashboard:
+
+| View | Description |
+|------|-------------|
+| **Explorer** | List and filter workflows in real-time |
+| **Details** | Event timeline with retry history |
+| **Graph** | Interactive SVG workflow visualization |
+| **Analytics** | KPIs, trends, and data export |
+
+### Replay Mode 🎬
+
+The replay mode allows you to "rewind" any workflow to see exactly how it evolved over time - ideal for debugging, post-mortems, and demos.
+
+**Controls:**
+- ▶️ Play/Pause - Automatic playback
+- ⏪ Rewind - Jump to start
+- ◀️▶️ Step - Navigate one event at a time
+- 🎚️ Slider - Jump to any point
+- ⏱️ Speed - 0.5x to 4x playback speed
 
 ---
 
@@ -132,6 +166,55 @@ The audit checks for:
 Exit codes:
 - `0`: No errors (may have warnings)
 - `1`: One or more errors found
+
+---
+
+## 📊 REST API
+
+BEAMFlow exposes a REST API for programmatic access to analytics:
+
+```bash
+# Health check (no rate limit)
+curl http://localhost:4000/api/health
+# => {"status":"ok","timestamp":"2025-11-28T12:00:00Z"}
+
+# Summary KPIs
+curl http://localhost:4000/api/analytics/summary
+# => {"total":150,"completed":142,"failed":8,"success_rate":94.67}
+
+# Trend data for charts
+curl http://localhost:4000/api/analytics/trends
+# => {"hourly_distribution":[...],"daily_trend":[...]}
+
+# Export data
+curl http://localhost:4000/api/analytics/export?format=json
+# => Full workflow data as JSON
+
+curl http://localhost:4000/api/analytics/export?format=csv
+# => CSV download
+```
+
+### Rate Limiting
+
+API endpoints (except `/api/health`) are rate limited to **60 requests per minute per IP**.
+
+Response headers include:
+- `X-RateLimit-Limit: 60`
+- `X-RateLimit-Remaining: 59`
+- `X-RateLimit-Reset: 1732800000`
+
+---
+
+## 📚 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [DEMO_GUIDE.md](docs/DEMO_GUIDE.md) | Quick demo walkthrough for evaluators |
+| [QA_CHECKLIST.md](docs/QA_CHECKLIST.md) | Manual testing checklist |
+| [DEVELOPMENT.md](docs/DEVELOPMENT.md) | Development setup and tooling |
+| [ADRs](docs/adr/) | Architecture Decision Records |
+
+---
 
 ## 📄 License
 MIT
