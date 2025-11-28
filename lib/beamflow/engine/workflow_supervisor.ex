@@ -46,8 +46,9 @@ defmodule Beamflow.Engine.WorkflowSupervisor do
 
   ## Parámetros
 
+    * `workflow_module` - Módulo que implementa `Beamflow.Workflows.Workflow`
     * `workflow_id` - Identificador único del workflow (String)
-    * `workflow_def` - Mapa con la definición del workflow
+    * `params` - Parámetros de entrada para `workflow_module.initial_state/1`
 
   ## Retorno
 
@@ -57,13 +58,32 @@ defmodule Beamflow.Engine.WorkflowSupervisor do
 
   ## Ejemplo
 
-      iex> start_workflow("order-123", %{steps: [:validate, :process, :complete]})
+      iex> start_workflow(
+      ...>   Beamflow.Domains.Insurance.InsuranceWorkflow,
+      ...>   "req-123",
+      ...>   %{"dni" => "12345678", "applicant_name" => "Juan"}
+      ...> )
       {:ok, #PID<0.456.0>}
   """
-  @spec start_workflow(String.t(), map()) :: DynamicSupervisor.on_start_child()
-  def start_workflow(workflow_id, workflow_def) do
-    spec = {WorkflowActor, {workflow_id, workflow_def}}
-    DynamicSupervisor.start_child(__MODULE__, spec)
+  @spec start_workflow(module(), String.t(), map()) :: DynamicSupervisor.on_start_child()
+  def start_workflow(workflow_module, workflow_id, params \\ %{}) do
+    child_spec = %{
+      id: WorkflowActor,
+      start: {
+        WorkflowActor,
+        :start_link,
+        [
+          [
+            workflow_module: workflow_module,
+            workflow_id: workflow_id,
+            params: params
+          ]
+        ]
+      },
+      restart: :transient
+    }
+
+    DynamicSupervisor.start_child(__MODULE__, child_spec)
   end
 
   @doc """
@@ -82,14 +102,17 @@ defmodule Beamflow.Engine.WorkflowSupervisor do
 
   ## Ejemplo
 
-      iex> stop_workflow("order-123")
+      iex> stop_workflow("req-123")
       :ok
   """
   @spec stop_workflow(String.t()) :: :ok | {:error, :not_found}
   def stop_workflow(workflow_id) do
     case Beamflow.Engine.Registry.lookup(workflow_id) do
-      [{pid, _}] -> DynamicSupervisor.terminate_child(__MODULE__, pid)
-      [] -> {:error, :not_found}
+      {:ok, pid} ->
+        DynamicSupervisor.terminate_child(__MODULE__, pid)
+
+      {:error, :not_found} ->
+        {:error, :not_found}
     end
   end
 end
