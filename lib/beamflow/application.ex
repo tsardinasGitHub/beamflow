@@ -18,6 +18,8 @@ defmodule Beamflow.Application do
     children = [
       BeamflowWeb.Telemetry,
       {Phoenix.PubSub, name: Beamflow.PubSub},
+      # Route Loader for dynamic dispatch branches
+      Beamflow.Workflows.RouteLoader,
       # Registry for Workflows
       Beamflow.Engine.Registry,
       # Start the Endpoint (http/https)

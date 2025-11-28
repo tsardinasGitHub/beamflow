@@ -409,6 +409,86 @@ defmodule Beamflow.Workflows.Graph do
   end
 
   @doc """
+  Crea un branch con dispatch dinámico cargado desde fuente externa.
+
+  Similar a `dispatch_branch/3` pero las rutas se cargan desde JSON, YAML,
+  configuración o un callback. Ideal para mappings que cambian sin redeploy.
+
+  ## Fuentes Soportadas
+
+    * `{:json, path}` - Archivo JSON (ej: "priv/routes/states.json")
+    * `{:yaml, path}` - Archivo YAML (requiere yaml_elixir)
+    * `{:config, key}` - Application.get_env(:beamflow, key)
+    * `{:callback, {module, function, args}}` - Función dinámica
+
+  ## Opciones
+
+    * `:cache_key` - Clave para cachear (default: from_id)
+    * `:refresh` - Estrategia de recarga:
+      - `:manual` - Solo con RouteLoader.reload/1 (default)
+      - `{:interval, ms}` - Recarga cada N milisegundos
+    * `:default_key` - Clave del default en JSON (default: "_default")
+
+  ## Formato JSON
+
+      {
+        "CA": "california_flow",
+        "TX": "texas_flow",
+        "_default": "generic_flow"
+      }
+
+  ## Ejemplo
+
+      graph
+      |> Graph.add_branch("state_router", &(&1.state_code))
+      |> Graph.dispatch_branch_dynamic("state_router",
+           {:json, "priv/routes/states.json"},
+           refresh: {:interval, 60_000}  # Recarga cada minuto
+         )
+
+  ## Nota
+
+  Las rutas se cargan al definir el grafo. Para hot-reload en runtime,
+  usa `RouteLoader.reload/1` o configura `:refresh`.
+  """
+  @spec dispatch_branch_dynamic(t(), node_id(), source :: term(), opts :: keyword()) :: t()
+  def dispatch_branch_dynamic(graph, from_id, source, opts \\ []) do
+    alias Beamflow.Workflows.RouteLoader
+
+    cache_key = Keyword.get(opts, :cache_key, from_id)
+
+    # Cargar rutas desde la fuente
+    case RouteLoader.load(source, opts) do
+      {:ok, routes} ->
+        # Registrar para posible recarga
+        if Keyword.has_key?(opts, :refresh) do
+          # Solo registrar si RouteLoader está corriendo
+          if Process.whereis(RouteLoader) do
+            RouteLoader.register(cache_key, Keyword.put(opts, :source, source))
+          end
+        end
+
+        # Cachear para uso en runtime
+        RouteLoader.load_and_cache(cache_key, source, opts)
+
+        # Usar dispatch_branch normal con las rutas cargadas
+        dispatch_branch(graph, from_id, routes)
+
+      {:error, reason} ->
+        raise ArgumentError, """
+        Failed to load routes for dispatch_branch_dynamic.
+
+        Source: #{inspect(source)}
+        Error: #{inspect(reason)}
+
+        Make sure the source file exists and has valid format:
+        - JSON: {"CA": "flow_a", "_default": "fallback"}
+        - Config: config :beamflow, :my_routes, %{"CA" => "flow_a", :default => "fallback"}
+        """
+    end
+  end
+
+  @doc """
   Establece el nodo inicial del grafo.
   """
   @spec set_start(t(), node_id()) :: t()

@@ -286,6 +286,60 @@ Ventajas de `dispatch_branch`:
 | Complexity check | Aplica | Bypassed |
 | Lookup | Iteración | O(1) |
 
+### Rutas Dinámicas desde Configuración Externa
+
+Para mappings que cambian sin redeploy, usar `dispatch_branch_dynamic`:
+
+```elixir
+# priv/routes/states.json
+# {
+#   "CA": "california_flow",
+#   "TX": "texas_flow",
+#   "_default": "generic_flow"
+# }
+
+graph
+|> Graph.add_branch("state_router", &(&1.state_code))
+|> Graph.dispatch_branch_dynamic("state_router",
+     {:json, "priv/routes/states.json"},
+     refresh: {:interval, 60_000}  # Recarga cada minuto
+   )
+```
+
+#### Fuentes Soportadas
+
+| Fuente | Sintaxis | Uso |
+|--------|----------|-----|
+| JSON | `{:json, "path/file.json"}` | Archivos en disco o priv/ |
+| YAML | `{:yaml, "path/file.yaml"}` | Requiere `:yaml_elixir` |
+| Config | `{:config, :my_routes}` | `config :beamflow, :my_routes, %{...}` |
+| Callback | `{:callback, {Mod, :fun, []}}` | Fuentes dinámicas (DB, API) |
+
+#### Recarga Automática
+
+```elixir
+# Manual (default) - solo con RouteLoader.reload/1
+dispatch_branch_dynamic("router", {:json, "routes.json"})
+
+# Por intervalo - recarga cada N ms
+dispatch_branch_dynamic("router", {:json, "routes.json"}, refresh: {:interval, 60_000})
+
+# Recarga manual desde código
+Beamflow.Workflows.RouteLoader.reload("router")
+```
+
+#### Formato JSON
+
+```json
+{
+  "CA": "california_flow",
+  "TX": "texas_flow",
+  "_default": "generic_flow"
+}
+```
+
+Nota: `_default` en JSON se convierte a `:default` internamente.
+
 Alternativas adicionales:
 
 ```elixir
@@ -310,6 +364,7 @@ end
 
 ## Changelog
 
+- 2025-11-28: Agregado `dispatch_branch_dynamic/4` y `RouteLoader` para rutas externas
 - 2025-11-28: Agregado `mix beamflow.audit` para auditoría de workflows
 - 2025-11-28: Agregado `pedantic_mode` (umbral 1) y `safe_branch/4`
 - 2025-11-28: Agregado `dispatch_branch` como mecanismo para branches grandes

@@ -743,4 +743,102 @@ defmodule Beamflow.Workflows.GraphTest do
     |> Graph.add_step("default_priority", StepA)
     |> Graph.connect_branch("three_decision", "default_priority", :default)
   end
+
+  # ============================================================================
+  # Tests para dispatch_branch_dynamic
+  # ============================================================================
+
+  describe "dispatch_branch_dynamic/4" do
+    test "carga rutas desde JSON" do
+      graph =
+        Graph.new()
+        |> Graph.add_branch("state_router", fn state -> state.state_code end)
+        |> Graph.add_step("california_flow", StepA)
+        |> Graph.add_step("texas_flow", StepA)
+        |> Graph.add_step("generic_state_flow", StepA)
+        |> Graph.dispatch_branch_dynamic("state_router",
+             {:json, "priv/routes/example_states.json"}
+           )
+
+      # Verificar que se crearon los edges
+      edges = Map.get(graph.edges, "state_router", [])
+      assert length(edges) >= 5  # CA, TX, NY, FL, WA + default
+
+      # Verificar el nodo está marcado como dispatch
+      node = graph.nodes["state_router"]
+      assert node.dispatch == true
+    end
+
+    test "carga rutas desde config" do
+      # Configurar rutas en Application
+      Application.put_env(:beamflow, :priority_routes, %{
+        "high" => "urgent_flow",
+        "medium" => "normal_flow",
+        :default => "low_priority_flow"
+      })
+
+      on_exit(fn -> Application.delete_env(:beamflow, :priority_routes) end)
+
+      graph =
+        Graph.new()
+        |> Graph.add_branch("priority_router", fn state -> state.priority end)
+        |> Graph.add_step("urgent_flow", StepA)
+        |> Graph.add_step("normal_flow", StepA)
+        |> Graph.add_step("low_priority_flow", StepA)
+        |> Graph.dispatch_branch_dynamic("priority_router",
+             {:config, :priority_routes}
+           )
+
+      edges = Map.get(graph.edges, "priority_router", [])
+      assert length(edges) == 3  # high, medium, default
+    end
+
+    test "lanza error si la fuente no existe" do
+      assert_raise ArgumentError, ~r/Failed to load routes/, fn ->
+        Graph.new()
+        |> Graph.add_branch("router", fn s -> s.x end)
+        |> Graph.dispatch_branch_dynamic("router", {:json, "nonexistent.json"})
+      end
+    end
+
+    test "next_nodes funciona con dispatch_branch_dynamic" do
+      graph =
+        Graph.new()
+        |> Graph.add_branch("state_router", fn state -> state.state_code end)
+        |> Graph.add_step("california_flow", StepA)
+        |> Graph.add_step("texas_flow", StepA)
+        |> Graph.add_step("new_york_flow", StepA)
+        |> Graph.add_step("generic_state_flow", StepA)
+        |> Graph.dispatch_branch_dynamic("state_router",
+             {:json, "priv/routes/example_states.json"}
+           )
+
+      # Match exacto
+      assert {:ok, ["california_flow"]} = Graph.next_nodes(graph, "state_router", %{state_code: "CA"})
+      assert {:ok, ["texas_flow"]} = Graph.next_nodes(graph, "state_router", %{state_code: "TX"})
+
+      # Default para código no conocido
+      assert {:ok, ["generic_state_flow"]} = Graph.next_nodes(graph, "state_router", %{state_code: "ZZ"})
+    end
+
+    test "bypasses complexity check" do
+      # 6 rutas + default = 7 opciones, pero no debería dar warning de complejidad
+      graph =
+        Graph.new()
+        |> Graph.add_branch("state_router", fn state -> state.state_code end)
+        |> Graph.add_step("california_flow", StepA)
+        |> Graph.add_step("texas_flow", StepA)
+        |> Graph.add_step("new_york_flow", StepA)
+        |> Graph.add_step("florida_flow", StepA)
+        |> Graph.add_step("washington_flow", StepA)
+        |> Graph.add_step("generic_state_flow", StepA)
+        |> Graph.set_start("state_router")
+        |> Graph.dispatch_branch_dynamic("state_router",
+             {:json, "priv/routes/example_states.json"}
+           )
+
+      {:ok, issues} = Graph.validate(graph)
+      refute Enum.any?(issues, &(&1.code in [:complex_branch, :branch_missing_default]))
+    end
+  end
 end

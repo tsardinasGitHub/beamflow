@@ -1,0 +1,8 @@
+{
+  "CA": "california_flow",
+  "TX": "texas_flow",
+  "NY": "new_york_flow",
+  "FL": "florida_flow",
+  "WA": "washington_flow",
+  "_default": "generic_state_flow"
+}
