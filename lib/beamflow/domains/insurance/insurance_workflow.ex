@@ -53,6 +53,8 @@ defmodule Beamflow.Domains.Insurance.InsuranceWorkflow do
     SendConfirmationEmail
   }
 
+  alias Beamflow.Workflows.Graph
+
   @impl true
   def steps do
     [
@@ -63,6 +65,35 @@ defmodule Beamflow.Domains.Insurance.InsuranceWorkflow do
       SendConfirmationEmail
     ]
   end
+
+  @doc """
+  Retorna el grafo del workflow con soporte para branching.
+
+  El workflow sigue el siguiente flujo:
+  1. ValidateIdentity → CheckCreditScore → EvaluateVehicleRisk → ApproveRequest
+  2. Después de ApproveRequest:
+     - Si approved=true → SendConfirmationEmail (con mensaje de aprobación)
+     - Si approved=false → SendConfirmationEmail (con mensaje de rechazo)
+
+  En este caso, ambos caminos llevan al mismo step (SendConfirmationEmail)
+  porque el step ya maneja internamente la lógica condicional.
+  En workflows más complejos, los paths podrían divergir completamente.
+  """
+  def graph do
+    # Por ahora usamos el grafo lineal, ya que SendConfirmationEmail
+    # maneja internamente la lógica de aprobado/rechazado.
+    # Cuando agreguemos steps específicos para cada rama,
+    # usaremos un grafo con branching real.
+    Graph.from_linear_steps(steps())
+  end
+
+  @doc """
+  Indica si este workflow tiene branching.
+
+  Actualmente retorna false porque usamos lógica condicional
+  dentro de SendConfirmationEmail en lugar de branches separados.
+  """
+  def has_branching?, do: false
 
   @impl true
   def initial_state(params) do

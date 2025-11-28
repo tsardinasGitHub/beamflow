@@ -59,6 +59,7 @@ defmodule Beamflow.Engine.WorkflowActor do
   alias Beamflow.Engine.Idempotency
   alias Beamflow.Engine.Registry, as: WorkflowRegistry
   alias Beamflow.Storage.WorkflowStore
+  alias Beamflow.Workflows.{Builder, Graph}
 
   @typedoc "Identificador único de workflow"
   @type workflow_id :: String.t()
@@ -140,10 +141,10 @@ defmodule Beamflow.Engine.WorkflowActor do
   @spec get_state(workflow_id()) :: {:ok, actor_state()} | {:error, :not_found}
   def get_state(workflow_id) do
     case WorkflowRegistry.lookup(workflow_id) do
-      [{pid, _}] when is_pid(pid) ->
+      {:ok, _pid} ->
         {:ok, GenServer.call(WorkflowRegistry.via_tuple(workflow_id), :get_state)}
 
-      [] ->
+      {:error, :not_found} ->
         {:error, :not_found}
     end
   end
@@ -179,20 +180,34 @@ defmodule Beamflow.Engine.WorkflowActor do
 
     Logger.info("Starting workflow actor: #{workflow_id} (module: #{inspect(workflow_module)})")
 
-    # Obtener steps del workflow
+    # Construir grafo del workflow (soporta lineal y branching)
+    graph = Builder.build(workflow_module)
+    has_branching = Builder.has_branching?(workflow_module)
+
+    # Obtener steps para compatibilidad (lista plana)
     steps = workflow_module.steps()
-    total_steps = length(steps)
+    total_steps = Graph.count_steps(graph)
 
     # Inicializar estado del workflow usando el callback del módulo
     workflow_state = workflow_module.initial_state(params)
+
+    # Determinar nodo inicial
+    current_node_id = graph.start_node
 
     actor_state = %{
       workflow_module: workflow_module,
       workflow_id: workflow_id,
       workflow_state: workflow_state,
+      # Compatibilidad con workflows lineales
       steps: steps,
       current_step_index: 0,
       total_steps: total_steps,
+      # Nuevo: soporte para grafos
+      graph: graph,
+      current_node_id: current_node_id,
+      has_branching: has_branching,
+      executed_nodes: [],
+      # Estado general
       status: :pending,
       started_at: DateTime.utc_now(),
       completed_at: nil,
@@ -201,7 +216,12 @@ defmodule Beamflow.Engine.WorkflowActor do
 
     # Persistir estado inicial y registrar evento
     persist_state(actor_state)
-    record_event(workflow_id, :workflow_started, %{workflow_module: workflow_module, params: params})
+    record_event(workflow_id, :workflow_started, %{
+      workflow_module: workflow_module,
+      params: params,
+      has_branching: has_branching,
+      total_steps: total_steps
+    })
 
     # Iniciar ejecución automática
     {:ok, actor_state, {:continue, :execute_next_step}}
@@ -222,54 +242,131 @@ defmodule Beamflow.Engine.WorkflowActor do
   @impl true
   def handle_continue(:execute_next_step, state) do
     %{
-      current_step_index: index,
-      total_steps: total,
-      steps: steps,
+      graph: graph,
+      current_node_id: current_node_id,
       workflow_module: workflow_module,
-      workflow_state: workflow_state,
-      workflow_id: workflow_id
+      workflow_state: _workflow_state,
+      workflow_id: workflow_id,
+      executed_nodes: executed_nodes
     } = state
 
-    cond do
-      # Todos los steps completados
-      index >= total ->
-        Logger.info("Workflow #{workflow_id} completed successfully")
+    # Verificar si estamos en un nodo terminal
+    if current_node_id == nil or Graph.is_end_node?(graph, current_node_id) and current_node_id in executed_nodes do
+      complete_workflow(state)
+    else
+      # Obtener el nodo actual
+      case Graph.get_node(graph, current_node_id) do
+        nil ->
+          complete_workflow(state)
 
-        new_state = %{state |
-          status: :completed,
-          completed_at: DateTime.utc_now()
-        }
+        %{type: :step, module: step_module} = node ->
+          execute_graph_step(node, step_module, workflow_module, state)
 
-        # Registrar evento de completado
-        record_event(workflow_id, :workflow_completed, %{
-          total_steps: total,
-          duration_ms: DateTime.diff(new_state.completed_at, new_state.started_at, :millisecond)
+        %{type: :branch} = node ->
+          handle_branch_node(node, state)
+
+        %{type: :join} ->
+          # Skip join, ir al siguiente
+          advance_to_next_node(state)
+
+        _ ->
+          Logger.error("Unknown node type in workflow #{workflow_id}")
+          {:noreply, %{state | status: :failed, error: :unknown_node_type}}
+      end
+    end
+  end
+
+  # ============================================================================
+  # Manejo de Nodos del Grafo
+  # ============================================================================
+
+  defp execute_graph_step(_node, step_module, workflow_module, state) do
+    %{workflow_state: workflow_state, workflow_id: workflow_id, executed_nodes: executed_nodes} = state
+    step_name = inspect(step_module)
+    step_index = length(executed_nodes)
+    total = state.total_steps
+
+    Logger.info("Workflow #{workflow_id}: Executing step #{step_index + 1}/#{total} (#{step_name})")
+
+    new_state = %{state | status: :running}
+
+    # Validar si el step implementa validate/1
+    case validate_step(step_module, workflow_state) do
+      :ok ->
+        execute_step(step_module, workflow_module, new_state)
+
+      {:error, validation_error} ->
+        Logger.error("Workflow #{workflow_id}: Step validation failed - #{inspect(validation_error)}")
+        handle_step_error(step_module, validation_error, workflow_module, new_state)
+    end
+  end
+
+  defp handle_branch_node(branch_node, state) do
+    %{graph: graph, workflow_state: workflow_state, workflow_id: workflow_id} = state
+
+    # Evaluar la condición del branch
+    next_nodes = Graph.next_nodes(graph, branch_node.id, workflow_state)
+
+    case next_nodes do
+      [next_node_id] ->
+        Logger.info("Workflow #{workflow_id}: Branch #{branch_node.id} -> #{next_node_id}")
+
+        record_event(workflow_id, :branch_taken, %{
+          branch_id: branch_node.id,
+          next_node: next_node_id
         })
 
-        broadcast_update(new_state)
-        persist_state(new_state)
+        new_state = %{state | current_node_id: next_node_id}
+        {:noreply, new_state, {:continue, :execute_next_step}}
 
-        {:noreply, new_state}
+      [] ->
+        Logger.error("Workflow #{workflow_id}: No branch path matched for #{branch_node.id}")
+        {:noreply, %{state | status: :failed, error: {:no_branch_match, branch_node.id}}}
 
-      # Ejecutar siguiente step
-      true ->
-        step_module = Enum.at(steps, index)
-
-        Logger.info("Workflow #{workflow_id}: Executing step #{index + 1}/#{total} (#{inspect(step_module)})")
-
-        new_state = %{state | status: :running}
-
-        # Validar si el step implementa validate/1
-        case validate_step(step_module, workflow_state) do
-          :ok ->
-            execute_step(step_module, workflow_module, new_state)
-
-          {:error, validation_error} ->
-            Logger.error("Workflow #{workflow_id}: Step validation failed - #{inspect(validation_error)}")
-
-            handle_step_error(step_module, validation_error, workflow_module, new_state)
-        end
+      multiple ->
+        Logger.error("Workflow #{workflow_id}: Multiple branch paths matched: #{inspect(multiple)}")
+        {:noreply, %{state | status: :failed, error: {:multiple_branch_match, multiple}}}
     end
+  end
+
+  defp advance_to_next_node(state) do
+    %{graph: graph, current_node_id: current_node_id, workflow_state: workflow_state} = state
+
+    next_nodes = Graph.next_nodes(graph, current_node_id, workflow_state)
+
+    case next_nodes do
+      [next_node_id] ->
+        new_state = %{state | current_node_id: next_node_id}
+        {:noreply, new_state, {:continue, :execute_next_step}}
+
+      [] ->
+        complete_workflow(state)
+
+      _ ->
+        {:noreply, %{state | status: :failed, error: :ambiguous_next_node}}
+    end
+  end
+
+  defp complete_workflow(state) do
+    %{workflow_id: workflow_id, executed_nodes: executed_nodes, started_at: started_at} = state
+
+    Logger.info("Workflow #{workflow_id} completed successfully (#{length(executed_nodes)} steps executed)")
+
+    new_state = %{state |
+      status: :completed,
+      completed_at: DateTime.utc_now()
+    }
+
+    record_event(workflow_id, :workflow_completed, %{
+      total_steps: length(executed_nodes),
+      executed_nodes: executed_nodes,
+      duration_ms: DateTime.diff(new_state.completed_at, started_at, :millisecond)
+    })
+
+    broadcast_update(new_state)
+    persist_state(new_state)
+
+    {:noreply, new_state}
   end
 
   @impl true
@@ -295,7 +392,8 @@ defmodule Beamflow.Engine.WorkflowActor do
   end
 
   defp execute_step(step_module, workflow_module, state) do
-    %{workflow_state: workflow_state, workflow_id: workflow_id, current_step_index: step_index} = state
+    %{workflow_id: workflow_id, executed_nodes: executed_nodes} = state
+    step_index = length(executed_nodes)
     step_name = inspect(step_module)
     start_time = System.monotonic_time(:millisecond)
 
@@ -337,7 +435,8 @@ defmodule Beamflow.Engine.WorkflowActor do
   # Los steps con side-effects pueden usar esta key para llamadas externas.
   # ════════════════════════════════════════════════════════════════════════════
   defp do_execute_step(step_module, workflow_module, state, idempotency_key, start_time) do
-    %{workflow_state: workflow_state, workflow_id: workflow_id, current_step_index: step_index} = state
+    %{workflow_state: workflow_state, workflow_id: workflow_id, executed_nodes: executed_nodes} = state
+    step_index = length(executed_nodes)
     step_name = inspect(step_module)
 
     # Inyectar idempotency_key en el estado del workflow
@@ -390,13 +489,26 @@ defmodule Beamflow.Engine.WorkflowActor do
   end
 
   defp advance_to_next_step(step_module, workflow_module, state, updated_workflow_state) do
+    %{graph: graph, current_node_id: current_node_id, executed_nodes: executed_nodes} = state
+
     # Llamar al callback de éxito del workflow
     new_workflow_state =
       workflow_module.handle_step_success(step_module, updated_workflow_state)
 
+    # Obtener siguiente nodo del grafo
+    next_nodes = Graph.next_nodes(graph, current_node_id, new_workflow_state)
+
+    next_node_id = case next_nodes do
+      [next_id] -> next_id
+      [] -> nil
+      _ -> nil  # Múltiples paths - error
+    end
+
     new_state = %{state |
       workflow_state: new_workflow_state,
-      current_step_index: state.current_step_index + 1
+      current_step_index: state.current_step_index + 1,
+      current_node_id: next_node_id,
+      executed_nodes: [current_node_id | executed_nodes]
     }
 
     broadcast_update(new_state)

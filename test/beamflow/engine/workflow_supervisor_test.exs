@@ -9,14 +9,23 @@ defmodule Beamflow.Engine.WorkflowSupervisorTest do
   use ExUnit.Case, async: true
 
   alias Beamflow.Engine.WorkflowSupervisor
+  alias Beamflow.Domains.Insurance.InsuranceWorkflow
   alias Beamflow.TestHelpers
 
-  describe "start_workflow/2" do
+  describe "start_workflow/3" do
     test "inicia un nuevo workflow actor exitosamente" do
       workflow_id = TestHelpers.unique_workflow_id()
-      workflow_data = %{name: "Test Workflow"}
 
-      assert {:ok, pid} = WorkflowSupervisor.start_workflow(workflow_id, workflow_data)
+      params = %{
+        "applicant_name" => "Test User",
+        "applicant_email" => "test@example.com",
+        "dni" => "12345678",
+        "vehicle_model" => "Toyota",
+        "vehicle_year" => "2020",
+        "vehicle_plate" => "ABC-123"
+      }
+
+      assert {:ok, pid} = WorkflowSupervisor.start_workflow(InsuranceWorkflow, workflow_id, params)
       assert is_pid(pid)
       assert Process.alive?(pid)
 
@@ -27,8 +36,16 @@ defmodule Beamflow.Engine.WorkflowSupervisorTest do
     test "retorna error si el workflow ya existe" do
       workflow_id = TestHelpers.unique_workflow_id()
 
-      {:ok, _pid} = WorkflowSupervisor.start_workflow(workflow_id, %{})
-      assert {:error, {:already_started, _}} = WorkflowSupervisor.start_workflow(workflow_id, %{})
+      params = %{
+        "applicant_name" => "Test User",
+        "dni" => "12345678",
+        "vehicle_model" => "Toyota",
+        "vehicle_year" => "2020",
+        "vehicle_plate" => "ABC-123"
+      }
+
+      {:ok, _pid} = WorkflowSupervisor.start_workflow(InsuranceWorkflow, workflow_id, params)
+      assert {:error, {:already_started, _}} = WorkflowSupervisor.start_workflow(InsuranceWorkflow, workflow_id, params)
 
       # Limpieza
       WorkflowSupervisor.stop_workflow(workflow_id)
@@ -38,7 +55,16 @@ defmodule Beamflow.Engine.WorkflowSupervisorTest do
   describe "stop_workflow/1" do
     test "detiene un workflow actor existente" do
       workflow_id = TestHelpers.unique_workflow_id()
-      {:ok, pid} = WorkflowSupervisor.start_workflow(workflow_id, %{})
+
+      params = %{
+        "applicant_name" => "Test User",
+        "dni" => "12345678",
+        "vehicle_model" => "Toyota",
+        "vehicle_year" => "2020",
+        "vehicle_plate" => "ABC-123"
+      }
+
+      {:ok, pid} = WorkflowSupervisor.start_workflow(InsuranceWorkflow, workflow_id, params)
 
       assert :ok = WorkflowSupervisor.stop_workflow(workflow_id)
 

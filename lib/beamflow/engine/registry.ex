@@ -70,19 +70,22 @@ defmodule Beamflow.Engine.Registry do
 
   ## Retorno
 
-    * `[{pid, value}]` - Lista con el proceso encontrado
-    * `[]` - Lista vacía si no existe
+    * `{:ok, pid}` - Proceso encontrado
+    * `{:error, :not_found}` - No existe proceso con ese ID
 
   ## Ejemplo
 
       iex> lookup("order-123")
-      [{#PID<0.123.0>, nil}]
+      {:ok, #PID<0.123.0>}
 
       iex> lookup("no-existe")
-      []
+      {:error, :not_found}
   """
-  @spec lookup(String.t()) :: [{pid(), term()}]
+  @spec lookup(String.t()) :: {:ok, pid()} | {:error, :not_found}
   def lookup(id) do
-    Registry.lookup(__MODULE__, id)
+    case Registry.lookup(__MODULE__, id) do
+      [{pid, _value}] -> {:ok, pid}
+      [] -> {:error, :not_found}
+    end
   end
 end
