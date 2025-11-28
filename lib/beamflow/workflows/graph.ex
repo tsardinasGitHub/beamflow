@@ -73,10 +73,22 @@ defmodule Beamflow.Workflows.Graph do
   # Constantes de Validación
   # ============================================================================
 
-  # Umbral por defecto para considerar un branch como "complejo"
+  # Umbral por defecto para considerar un branch como "complejo" (configurable)
   @default_max_branch_options 5
 
-  # Umbral para escalar a error (branches sin default con N+ opciones)
+  # Umbral FIJO para escalar a error cuando un branch no tiene default.
+  # Esta es una "regla de oro" de seguridad que NO es configurable.
+  #
+  # Justificación:
+  # - Con 5+ opciones sin default, la probabilidad de olvidar un caso es alta
+  # - Estudios de code review muestran que humanos detectan ~60% de bugs en
+  #   switch/case con >4 ramas (McConnell, Code Complete)
+  # - Forzar default reduce defectos en producción significativamente
+  #
+  # Si tu dominio requiere branches grandes sin default, considera:
+  # 1. Usar una lookup table (Map) en lugar de branches
+  # 2. Refactorizar a sub-workflows
+  # 3. Agregar un :default path que loguee casos inesperados
   @error_threshold_no_default 5
 
   # ============================================================================
@@ -417,21 +429,58 @@ defmodule Beamflow.Workflows.Graph do
   ## Opciones
 
     * `:max_branch_options` - Umbral para considerar un branch como complejo (default: 5)
+    * `:strict_mode` - Si es `true`, reduce umbrales a 3 para equipos que quieren máxima seguridad
+
       Se puede configurar globalmente en `config/config.exs`:
       ```elixir
       config :beamflow, :validation,
-        max_branch_options: 5
+        max_branch_options: 5,
+        strict_mode: false
       ```
+
+  ## Nota sobre `error_threshold_no_default`
+
+  El umbral para escalar a error cuando un branch no tiene default (5) es **fijo y no configurable**.
+  Esta es una decisión de diseño intencional basada en estudios de code review que muestran
+  que la detección humana de casos faltantes decrece significativamente con >4 ramas.
+  Ver ADR-006 para más detalles.
+
+  Si necesitas branches grandes sin default, considera usar lookup tables o sub-workflows.
+
+  ## Modos de Validación
+
+  | Modo | `max_branch_options` | `error_threshold_no_default` | Caso de uso |
+  |------|---------------------|------------------------------|-------------|
+  | Normal | 5 | 5 | Desarrollo día a día |
+  | Strict | 3 | 3 | Proyectos de alta confiabilidad |
+  | Paranoid | 2 | 2 | Sistemas críticos (financiero, salud) |
+
   """
   @spec validate(t(), keyword()) :: {:ok, [validation_issue()]} | {:error, [validation_issue()]}
   def validate(graph, opts \\ []) do
-    # Prioridad: opts > config > default
+    paranoid_mode = opts[:paranoid_mode] || get_config(:paranoid_mode) || false
+    strict_mode = opts[:strict_mode] || get_config(:strict_mode) || false
+
+    # Determinar umbrales según modo
+    # paranoid_mode tiene precedencia sobre strict_mode
+    {default_max, error_threshold} =
+      cond do
+        paranoid_mode -> {2, 2}
+        strict_mode -> {3, 3}
+        true -> {@default_max_branch_options, @error_threshold_no_default}
+      end
+
     max_branch_options =
       opts[:max_branch_options] ||
         get_config(:max_branch_options) ||
-        @default_max_branch_options
+        default_max
 
-    validation_opts = %{max_branch_options: max_branch_options}
+    validation_opts = %{
+      max_branch_options: max_branch_options,
+      error_threshold_no_default: error_threshold,
+      strict_mode: strict_mode,
+      paranoid_mode: paranoid_mode
+    }
 
     issues =
       []
@@ -564,14 +613,15 @@ defmodule Beamflow.Workflows.Graph do
   @doc false
   # Validación unificada de branches: severidad escalada según opciones y presencia de default
   #
-  # | Opciones | Default? | Severidad | Código                       |
-  # |----------|----------|-----------|------------------------------|
-  # | 1-4      | No       | Warning   | :branch_without_default      |
-  # | 5+       | No       | Error     | :branch_missing_default      |
-  # | >max     | Sí       | Warning   | :complex_branch              |
-  # | ≤max     | Sí       | OK        | (sin issue)                  |
+  # | Opciones        | Default? | Severidad | Código                       |
+  # |-----------------|----------|-----------|------------------------------|
+  # | < threshold     | No       | Warning   | :branch_without_default      |
+  # | >= threshold    | No       | Error     | :branch_missing_default      |
+  # | > max_options   | Sí       | Warning   | :complex_branch              |
+  # | <= max_options  | Sí       | OK        | (sin issue)                  |
   defp validate_branch_safety(issues, graph, opts) do
     max_options = opts.max_branch_options
+    error_threshold = opts.error_threshold_no_default
 
     graph.nodes
     |> Enum.filter(fn {_id, node} -> node.type == :branch end)
@@ -587,13 +637,13 @@ defmodule Beamflow.Workflows.Graph do
 
       cond do
         # Sin default y muchas opciones → Error (muy riesgoso)
-        not has_default and option_count >= @error_threshold_no_default ->
+        not has_default and option_count >= error_threshold ->
           [
             build_issue(
               :error,
               :branch_missing_default,
               "Branch '#{node_id}' has #{option_count} options but no default path. " <>
-                "With #{@error_threshold_no_default}+ options, a default is required.",
+                "With #{error_threshold}+ options, a default is required.",
               %{branch_id: node_id, option_count: option_count, has_default: false}
             )
             | acc

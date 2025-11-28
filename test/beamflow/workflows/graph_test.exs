@@ -280,6 +280,67 @@ defmodule Beamflow.Workflows.GraphTest do
       {:ok, issues_strict} = Graph.validate(graph, max_branch_options: 3)
       assert Enum.any?(issues_strict, &(&1.code == :complex_branch))
     end
+
+    test "strict_mode reduce ambos umbrales a 3" do
+      # Branch con 3 opciones sin default - normalmente sería warning
+      graph = build_branch_with_3_options()
+
+      # Sin strict_mode: 3 opciones sin default = warning (< 5)
+      {:ok, issues_normal} = Graph.validate(graph)
+      assert Enum.any?(issues_normal, &(&1.code == :branch_without_default))
+      refute Enum.any?(issues_normal, &(&1.code == :branch_missing_default))
+
+      # Con strict_mode: 3 opciones sin default = error (>= 3)
+      {:error, issues_strict} = Graph.validate(graph, strict_mode: true)
+      assert Enum.any?(issues_strict, &(&1.code == :branch_missing_default))
+    end
+
+    test "strict_mode también reduce umbral de complejidad" do
+      # Branch con 4 opciones con default
+      graph = build_branch_with_4_options_and_default()
+
+      # Sin strict_mode: 4 opciones con default no es complejo (< 5)
+      {:ok, issues_normal} = Graph.validate(graph)
+      refute Enum.any?(issues_normal, &(&1.code == :complex_branch))
+
+      # Con strict_mode: 4 opciones con default es complejo (> 3)
+      {:ok, issues_strict} = Graph.validate(graph, strict_mode: true)
+      assert Enum.any?(issues_strict, &(&1.code == :complex_branch))
+    end
+
+    test "paranoid_mode reduce umbrales a 2" do
+      # Branch binario (2 opciones) sin default
+      graph = build_branch_graph()  # approved/rejected, sin default
+
+      # Sin paranoid_mode: 2 opciones sin default = warning (< 5)
+      {:ok, issues_normal} = Graph.validate(graph)
+      assert Enum.any?(issues_normal, &(&1.code == :branch_without_default))
+      refute Enum.any?(issues_normal, &(&1.code == :branch_missing_default))
+
+      # Con paranoid_mode: 2 opciones sin default = error (>= 2)
+      {:error, issues_paranoid} = Graph.validate(graph, paranoid_mode: true)
+      assert Enum.any?(issues_paranoid, &(&1.code == :branch_missing_default))
+    end
+
+    test "paranoid_mode tiene precedencia sobre strict_mode" do
+      graph = build_branch_graph()  # 2 opciones
+
+      # Con ambos modos, paranoid_mode gana (umbral 2 en lugar de 3)
+      {:error, issues} = Graph.validate(graph, strict_mode: true, paranoid_mode: true)
+      assert Enum.any?(issues, &(&1.code == :branch_missing_default))
+    end
+
+    test "paranoid_mode detecta branches con 3 opciones con default como complejos" do
+      graph = build_branch_with_3_options_and_default()
+
+      # Sin paranoid_mode: 3 opciones con default no es complejo
+      {:ok, issues_normal} = Graph.validate(graph)
+      refute Enum.any?(issues_normal, &(&1.code == :complex_branch))
+
+      # Con paranoid_mode: 3 opciones con default es complejo (> 2)
+      {:ok, issues_paranoid} = Graph.validate(graph, paranoid_mode: true)
+      assert Enum.any?(issues_paranoid, &(&1.code == :complex_branch))
+    end
   end
 
   # ============================================================================
@@ -408,5 +469,27 @@ defmodule Beamflow.Workflows.GraphTest do
     build_branch_with_4_options()
     |> Graph.add_step("default_level", StepA)
     |> Graph.connect_branch("four_decision", "default_level", :default)
+  end
+
+  # Branch con 3 opciones sin default (para test de strict_mode)
+  defp build_branch_with_3_options do
+    Graph.new()
+    |> Graph.add_step("start", StartStep)
+    |> Graph.add_branch("three_decision", fn state -> Map.get(state, :priority) end)
+    |> Graph.add_step("high", StepA)
+    |> Graph.add_step("medium", StepA)
+    |> Graph.add_step("low", StepA)
+    |> Graph.set_start("start")
+    |> Graph.connect("start", "three_decision")
+    |> Graph.connect_branch("three_decision", "high", :high)
+    |> Graph.connect_branch("three_decision", "medium", :medium)
+    |> Graph.connect_branch("three_decision", "low", :low)
+  end
+
+  # Branch con 3 opciones con default (para test de paranoid_mode complejidad)
+  defp build_branch_with_3_options_and_default do
+    build_branch_with_3_options()
+    |> Graph.add_step("default_priority", StepA)
+    |> Graph.connect_branch("three_decision", "default_priority", :default)
   end
 end
