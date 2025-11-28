@@ -6,9 +6,31 @@
 
 ---
 
-## 🚀 Inicio Rápido (30 segundos)
+## 🚀 Inicio Rápido (1 minuto)
 
-### ¿Qué es BEAMFlow?
+### Opción A: Demo Automática (Recomendada)
+
+```bash
+# Iniciar la aplicación
+iex -S mix phx.server
+
+# En otra terminal, ejecutar el script de demo
+mix run scripts/demo_setup.exs --count 15 --chaos
+```
+
+El script:
+- ✅ Crea 15 workflows de seguro vehicular
+- ✅ Usa datos realistas (nombres, vehículos, DNIs)
+- ✅ Activa Chaos Mode para demostrar resiliencia
+- ✅ Muestra instrucciones de navegación
+
+### Opción B: Demo Manual
+
+Sigue los pasos detallados a continuación.
+
+---
+
+## 🎯 ¿Qué es BEAMFlow? (30 segundos)
 
 BEAMFlow es un **motor de orquestación de workflows distribuido** construido con Elixir/OTP que demuestra:
 
@@ -20,6 +42,9 @@ BEAMFlow es un **motor de orquestación de workflows distribuido** construido co
 | 💥 **Chaos Engineering** | Modo de prueba que inyecta fallos aleatorios |
 | 🎬 **Debugging Visual** | "Rebobinar" workflows para entender qué pasó |
 
+<!-- TODO: Screenshots del dashboard -->
+<!-- ![Dashboard Overview](images/dashboard-overview.png) -->
+
 ---
 
 ## 📋 Demo Paso a Paso
@@ -29,6 +54,8 @@ BEAMFlow es un **motor de orquestación de workflows distribuido** construido co
 1. Navegar a `http://localhost:4000`
 2. Verás el **Workflow Explorer** con la lista de workflows
 
+> 💡 Si usaste el script de demo (`demo_setup.exs`), ya deberías ver workflows en la lista.
+
 **Qué observar:**
 - ✅ Badges de colores por estado (verde=completado, rojo=fallido)
 - ✅ Contador de workflows activos
@@ -37,6 +64,15 @@ BEAMFlow es un **motor de orquestación de workflows distribuido** construido co
 ---
 
 ### Paso 2: Crear Workflows de Prueba (1 min)
+
+**Si ya usaste el script de demo, salta a Paso 3.**
+
+**Opción rápida (recomendada):**
+```bash
+mix run scripts/demo_setup.exs --count 10
+```
+
+**Opción manual (IEx):**
 
 Abre una terminal y ejecuta:
 
@@ -131,9 +167,19 @@ Si hay retries o fallos:
 - 📊 Post-mortem de incidentes
 - 🎓 Demos para stakeholders
 
+<!-- TODO: GIF del modo replay -->
+<!-- ![Replay Mode Demo](images/replay-mode.gif) -->
+
 ---
 
 ### Paso 6: Activar Chaos Mode 💥 (2 min)
+
+**Opción rápida (con el script):**
+```bash
+mix run scripts/demo_setup.exs --count 15 --chaos
+```
+
+**Opción manual (IEx):**
 
 1. En IEx, ejecuta:
 ```elixir

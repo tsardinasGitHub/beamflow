@@ -12,6 +12,7 @@
 - [ ] Mnesia inicializado (tablas creadas)
 - [ ] Navegador abierto en `http://localhost:4000`
 - [ ] Terminal con IEx disponible para comandos
+- [ ] Script de demo ejecutado: `mix run scripts/demo_setup.exs --count 20`
 
 ---
 
@@ -25,6 +26,7 @@ Verificación rápida de que nada está roto.
 | 1.2 | Dashboard carga | Navegar a `/` | Lista de workflows visible | ☐ |
 | 1.3 | Sin errores JS | Abrir DevTools → Console | Sin errores rojos | ☐ |
 | 1.4 | WebSocket conecta | Network → WS | LiveView conectado | ☐ |
+| 1.5 | Demo script | `mix run scripts/demo_setup.exs` | 10 workflows creados | ☐ |
 
 ---
 
@@ -200,6 +202,7 @@ Verificación rápida de que nada está roto.
 | 7.3 | Iniciar aggressive | `ChaosMonkey.start(:aggressive)` | Log de activación | ☐ |
 | 7.4 | Stats | `ChaosMonkey.stats()` | Estadísticas correctas | ☐ |
 | 7.5 | Stop | `ChaosMonkey.stop()` | Se detiene | ☐ |
+| 7.6 | Via script | `demo_setup.exs --chaos` | Chaos activado automáticamente | ☐ |
 
 ### Comportamiento
 
@@ -240,15 +243,15 @@ Verificación rápida de que nada está roto.
 
 | Sección | Tests | Pasaron | Fallaron | Notas |
 |---------|-------|---------|----------|-------|
-| Smoke Tests | 4 | ☐ | ☐ | |
+| Smoke Tests | 5 | ☐ | ☐ | |
 | Explorer | 12 | ☐ | ☐ | |
 | Details | 14 | ☐ | ☐ | |
 | Graph | 22 | ☐ | ☐ | |
 | Analytics | 14 | ☐ | ☐ | |
 | API REST | 9 | ☐ | ☐ | |
-| Chaos Mode | 9 | ☐ | ☐ | |
+| Chaos Mode | 10 | ☐ | ☐ | |
 | Edge Cases | 6 | ☐ | ☐ | |
-| **TOTAL** | **90** | ☐ | ☐ | |
+| **TOTAL** | **92** | ☐ | ☐ | |
 
 ---
 

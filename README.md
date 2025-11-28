@@ -28,16 +28,23 @@
 
 BEAMFlow includes a comprehensive visual dashboard:
 
-| View | Description |
-|------|-------------|
-| **Explorer** | List and filter workflows in real-time |
-| **Details** | Event timeline with retry history |
-| **Graph** | Interactive SVG workflow visualization |
-| **Analytics** | KPIs, trends, and data export |
+<!-- Screenshots: Run `mix run scripts/demo_setup.exs` then capture these views -->
+
+| View | Description | Screenshot |
+|------|-------------|------------|
+| **Explorer** | List and filter workflows in real-time | [View](docs/images/dashboard-explorer.png) |
+| **Details** | Event timeline with retry history | [View](docs/images/dashboard-details.png) |
+| **Graph** | Interactive SVG workflow visualization | [View](docs/images/dashboard-graph.png) |
+| **Analytics** | KPIs, trends, and data export | [View](docs/images/dashboard-analytics.png) |
+
+> 📸 *Para generar datos de demo: `mix run scripts/demo_setup.exs --count 15`*
 
 ### Replay Mode 🎬
 
 The replay mode allows you to "rewind" any workflow to see exactly how it evolved over time - ideal for debugging, post-mortems, and demos.
+
+<!-- TODO: Add GIF showing replay in action -->
+<!-- ![Replay Mode Demo](docs/images/replay-mode.gif) -->
 
 **Controls:**
 - ▶️ Play/Pause - Automatic playback
@@ -45,6 +52,8 @@ The replay mode allows you to "rewind" any workflow to see exactly how it evolve
 - ◀️▶️ Step - Navigate one event at a time
 - 🎚️ Slider - Jump to any point
 - ⏱️ Speed - 0.5x to 4x playback speed
+
+> 💡 *See [DEMO_GUIDE.md](docs/DEMO_GUIDE.md) for a complete walkthrough*
 
 ---
 
@@ -123,8 +132,25 @@ iex -S mix phx.server
 ### 4. Access the Dashboard
 Open `http://localhost:4000` to see the Real-Time Workflow Dashboard.
 
-### 5. Unleash Chaos 💥
-Toggle the **"Enable Chaos Mode"** switch in the UI. You will see processes crashing in the logs, but the "Success Rate" metric will remain stable as OTP recovers them.
+### 5. Quick Demo Setup 🚀
+Generate sample workflows automatically:
+```bash
+# Create 10 demo workflows
+mix run scripts/demo_setup.exs
+
+# Create 20 workflows with chaos mode enabled
+mix run scripts/demo_setup.exs --count 20 --chaos
+
+# See all options
+mix run scripts/demo_setup.exs --help
+```
+
+### 6. Unleash Chaos 💥
+Toggle the **"Enable Chaos Mode"** switch in the UI or via IEx:
+```elixir
+Beamflow.Chaos.ChaosMonkey.start(:moderate)
+```
+You will see processes crashing in the logs, but the "Success Rate" metric will remain stable as OTP recovers them.
 
 ---
 
