@@ -175,6 +175,11 @@ defmodule Beamflow.Workflows.Graph do
 
   @doc """
   Agrega un nodo branch (bifurcación condicional) al grafo.
+
+  > #### Deprecation Warning {: .warning}
+  >
+  > Considera usar `safe_branch/4` o `dispatch_branch/3` en su lugar.
+  > Estos garantizan `:default` path en compile-time.
   """
   @spec add_branch(t(), node_id(), condition(), keyword()) :: t()
   def add_branch(graph, id, condition, opts \\ []) do
@@ -187,6 +192,91 @@ defmodule Beamflow.Workflows.Graph do
     }
 
     %{graph | nodes: Map.put(graph.nodes, id, node)}
+  end
+
+  @doc """
+  Agrega un branch seguro que requiere definir todas las rutas incluyendo `:default`.
+
+  A diferencia de `add_branch/4`, esta función toma las rutas en la misma llamada
+  y **falla en compile-time** si no incluye `:default`.
+
+  ## Parámetros
+
+    * `graph` - El grafo
+    * `id` - ID único del nodo branch
+    * `condition` - Función que evalúa el estado y retorna el valor a matchear
+    * `routes` - Map de `valor => node_id`. **Debe incluir `:default`**
+
+  ## Ejemplo
+
+      graph
+      |> Graph.add_step("start", StartStep)
+      |> Graph.safe_branch("decision", &(&1.status), %{
+        :approved => "approve_flow",
+        :rejected => "reject_flow",
+        :default => "review_flow"  # OBLIGATORIO
+      })
+      |> Graph.add_step("approve_flow", ApproveStep)
+      |> Graph.add_step("reject_flow", RejectStep)
+      |> Graph.add_step("review_flow", ReviewStep)
+
+  ## vs `add_branch` + `connect_branch`
+
+  | Aspecto | `add_branch` | `safe_branch` |
+  |---------|--------------|---------------|
+  | `:default` | Opcional (runtime warning/error) | Obligatorio (compile-time) |
+  | Definición | Separada de rutas | Todo junto |
+  | Seguridad | Depende de validación | Garantizada |
+
+  ## Errores
+
+    * Lanza `ArgumentError` si falta `:default`
+    * Lanza `ArgumentError` si `routes` está vacío
+  """
+  @spec safe_branch(t(), node_id(), condition(), %{required(:default) => node_id(), optional(any()) => node_id()}) :: t()
+  def safe_branch(graph, id, condition, routes) when is_map(routes) do
+    # Validar que :default existe
+    unless Map.has_key?(routes, :default) do
+      raise ArgumentError, """
+      safe_branch requires a :default key.
+
+      Got routes: #{inspect(Map.keys(routes))}
+
+      Add a :default route:
+        %{
+          :approved => "approve_flow",
+          :rejected => "reject_flow",
+          :default => "fallback_flow"  # <- Required
+        }
+      """
+    end
+
+    # Validar que hay al menos una ruta además de :default
+    if map_size(routes) < 2 do
+      raise ArgumentError, """
+      safe_branch requires at least one route besides :default.
+
+      If you only have a default, use Graph.connect/3 instead.
+      """
+    end
+
+    # Crear el nodo branch marcado como safe
+    node = %{
+      id: id,
+      module: nil,
+      type: :branch,
+      condition: condition,
+      label: "safe_branch:#{id}",
+      safe: true,
+      dispatch: true  # También excluir del complexity check
+    }
+
+    graph = %{graph | nodes: Map.put(graph.nodes, id, node)}
+
+    # Crear edges para cada ruta
+    Enum.reduce(routes, graph, fn {condition_value, target_id}, acc ->
+      connect_branch(acc, id, target_id, condition_value)
+    end)
   end
 
   @doc """
@@ -279,9 +369,9 @@ defmodule Beamflow.Workflows.Graph do
     unless Map.has_key?(routes, :default) do
       raise ArgumentError, """
       dispatch_branch requires a :default key.
-      
+
       Got routes: #{inspect(Map.keys(routes))}
-      
+
       Add a :default route:
         %{
           "CA" => "california_flow",
@@ -294,7 +384,7 @@ defmodule Beamflow.Workflows.Graph do
     if map_size(routes) < 2 do
       raise ArgumentError, """
       dispatch_branch requires at least one route besides :default.
-      
+
       Got only: #{inspect(Map.keys(routes))}
       """
     end
@@ -310,9 +400,9 @@ defmodule Beamflow.Workflows.Graph do
 
   defp mark_as_dispatch(graph, node_id) do
     case Map.get(graph.nodes, node_id) do
-      nil -> 
+      nil ->
         graph
-      node -> 
+      node ->
         updated_node = Map.put(node, :dispatch, true)
         %{graph | nodes: Map.put(graph.nodes, node_id, updated_node)}
     end
@@ -536,17 +626,27 @@ defmodule Beamflow.Workflows.Graph do
   | Normal | 5 | 5 | Desarrollo día a día |
   | Strict | 3 | 3 | Proyectos de alta confiabilidad |
   | Paranoid | 2 | 2 | Sistemas críticos (financiero, salud) |
+  | Pedantic | 1 | 1 | Zero tolerance - todo branch requiere default |
+
+  > #### Tip: safe_branch {: .tip}
+  >
+  > En lugar de usar `pedantic_mode`, considera usar `safe_branch/4` o `dispatch_branch/3`
+  > que garantizan `:default` en compile-time sin necesidad de modos de validación.
 
   """
   @spec validate(t(), keyword()) :: {:ok, [validation_issue()]} | {:error, [validation_issue()]}
   def validate(graph, opts \\ []) do
+    pedantic_mode = opts[:pedantic_mode] || get_config(:pedantic_mode) || false
     paranoid_mode = opts[:paranoid_mode] || get_config(:paranoid_mode) || false
     strict_mode = opts[:strict_mode] || get_config(:strict_mode) || false
 
-    # Determinar umbrales según modo
-    # paranoid_mode tiene precedencia sobre strict_mode
+    # Determinar umbrales según modo (orden de precedencia: pedantic > paranoid > strict > normal)
+    # pedantic_mode: cualquier branch sin default es error
+    # paranoid_mode: branch binario sin default es error
+    # strict_mode: 3+ opciones sin default es error
     {default_max, error_threshold} =
       cond do
+        pedantic_mode -> {1, 1}
         paranoid_mode -> {2, 2}
         strict_mode -> {3, 3}
         true -> {@default_max_branch_options, @error_threshold_no_default}
@@ -561,7 +661,8 @@ defmodule Beamflow.Workflows.Graph do
       max_branch_options: max_branch_options,
       error_threshold_no_default: error_threshold,
       strict_mode: strict_mode,
-      paranoid_mode: paranoid_mode
+      paranoid_mode: paranoid_mode,
+      pedantic_mode: pedantic_mode
     }
 
     issues =

@@ -77,47 +77,83 @@ En lugar de hacer el umbral completamente configurable, ofrecemos modos predefin
 │ Normal      │ 5              │ 5                │ Día a día    │
 │ Strict      │ 3              │ 3                │ Alta calidad │
 │ Paranoid    │ 2              │ 2                │ Crítico      │
-└─────────────┴────────────────┴──────────────────┴──────────────┘
+```
+┌─────────────┬────────────────┬──────────────────┬──────────────────────┐
+│ Modo        │ max_options    │ error_threshold  │ Caso de uso          │
+├─────────────┼────────────────┼──────────────────┼──────────────────────┤
+│ Normal      │ 5              │ 5                │ Desarrollo día a día │
+│ Strict      │ 3              │ 3                │ Alta confiabilidad   │
+│ Paranoid    │ 2              │ 2                │ Financiero, salud    │
+│ Pedantic    │ 1              │ 1                │ Zero tolerance       │
+└─────────────┴────────────────┴──────────────────┴──────────────────────┘
 ```
 
-**Paranoid mode** (umbral 2) es para sistemas donde incluso un branch binario sin default es 
-inaceptable:
+**Pedantic mode** (umbral 1) es para equipos que creen que **todo branch debe tener default**:
 
 ```elixir
-# ¿Por qué un branch binario sin default es peligroso?
-case result do
-  :approved -> handle_approved()
-  :rejected -> handle_rejected()
-  # ¿Qué pasa con :pending, :timeout, nil, :error...?
+# Un branch de 1 opción sin default es absurdo
+# Si solo hay un camino, ¿para qué es un branch?
+case status do
+  :active -> handle_active()
+  # Si status es :inactive, :pending, nil, etc. → workflow muere
 end
 ```
 
-### 3. Solo Puedes Hacer el Sistema MÁS Estricto
+**Paranoid mode** (umbral 2) es para sistemas donde un branch binario sin default es inaceptable.
+
+### 3. Alternativas a Modos: safe_branch y dispatch_branch
+
+En lugar de confiar en validación runtime, ofrecemos constructos que **garantizan `:default`
+en compile-time**:
+
+```elixir
+# safe_branch: Define branch y rutas juntos, :default obligatorio
+Graph.safe_branch("decision", &(&1.status), %{
+  :approved => "approve_flow",
+  :rejected => "reject_flow",
+  :default => "review_flow"  # Falla si falta
+})
+
+# dispatch_branch: Lookup table para branches grandes
+Graph.dispatch_branch("state_router", %{
+  "CA" => "california_flow",
+  "TX" => "texas_flow",
+  :default => "generic_flow"  # Falla si falta
+})
+```
+
+Ambos:
+- Fuerzan `:default` en compile-time (no runtime)
+- Bypassean el complexity check (porque son "seguros")
+- Son la alternativa recomendada a usar modos estrictos
+
+### 4. Solo Puedes Hacer el Sistema MÁS Estricto
 
 El diseño permite:
-- ✅ Reducir umbrales (strict_mode, paranoid_mode)
+- ✅ Reducir umbrales (strict_mode, paranoid_mode, pedantic_mode)
+- ✅ Usar safe_branch/dispatch_branch para garantía compile-time
 - ❌ Aumentar umbrales más allá del default
 
-Esto es intencional: protege contra la presión de "relajar las reglas para el deadline".
+Esto protege contra "relajar las reglas para el deadline".
 
 ## Configuración
 
 ```elixir
 # config/config.exs
 
-# Opción 1: Modo normal (default)
-# No requiere configuración
+# Modo normal (default) - no requiere configuración
 
-# Opción 2: Strict mode para todo el proyecto
-config :beamflow, :validation,
-  strict_mode: true
+# Strict mode
+config :beamflow, :validation, strict_mode: true
 
-# Opción 3: Paranoid mode para sistemas críticos
-config :beamflow, :validation,
-  paranoid_mode: true
+# Paranoid mode
+config :beamflow, :validation, paranoid_mode: true
 
-# Opción 4: Por llamada específica
-Graph.validate(graph, paranoid_mode: true)
+# Pedantic mode (zero tolerance)
+config :beamflow, :validation, pedantic_mode: true
+
+# Por llamada específica
+Graph.validate(graph, pedantic_mode: true)
 ```
 
 ## Consecuencias
@@ -187,5 +223,6 @@ end
 
 ## Changelog
 
+- 2025-11-28: Agregado `pedantic_mode` (umbral 1) y `safe_branch/4`
 - 2025-11-28: Agregado `dispatch_branch` como mecanismo para branches grandes
 - 2025-11-28: Decisión inicial aceptada

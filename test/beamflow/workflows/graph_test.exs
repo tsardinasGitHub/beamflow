@@ -451,6 +451,150 @@ defmodule Beamflow.Workflows.GraphTest do
   end
 
   # ============================================================================
+  # Tests para safe_branch
+  # ============================================================================
+
+  describe "safe_branch/4" do
+    test "crea branch con rutas y marca como safe" do
+      graph =
+        Graph.new()
+        |> Graph.add_step("start", StartStep)
+        |> Graph.safe_branch("decision", fn s -> s.status end, %{
+          :approved => "approve",
+          :rejected => "reject",
+          :default => "review"
+        })
+        |> Graph.add_step("approve", StepA)
+        |> Graph.add_step("reject", StepA)
+        |> Graph.add_step("review", StepA)
+        |> Graph.set_start("start")
+        |> Graph.connect("start", "decision")
+
+      # Verifica que el nodo está marcado como safe y dispatch
+      node = Map.get(graph.nodes, "decision")
+      assert node.safe == true
+      assert node.dispatch == true
+
+      # Verifica que se crearon los edges
+      edges = Map.get(graph.edges, "decision", [])
+      assert length(edges) == 3
+    end
+
+    test "lanza error si falta :default" do
+      assert_raise ArgumentError, ~r/requires a :default key/, fn ->
+        Graph.new()
+        |> Graph.safe_branch("decision", fn s -> s.status end, %{
+          :approved => "approve",
+          :rejected => "reject"
+        })
+      end
+    end
+
+    test "lanza error si solo tiene :default" do
+      assert_raise ArgumentError, ~r/at least one route besides :default/, fn ->
+        Graph.new()
+        |> Graph.safe_branch("decision", fn s -> s.status end, %{
+          :default => "fallback"
+        })
+      end
+    end
+
+    test "safe_branch bypasses complexity check" do
+      graph =
+        Graph.new()
+        |> Graph.add_step("start", StartStep)
+        |> Graph.safe_branch("router", fn s -> s.level end, %{
+          :l1 => "p1", :l2 => "p2", :l3 => "p3", :l4 => "p4",
+          :l5 => "p5", :l6 => "p6", :l7 => "p7", :l8 => "p8",
+          :default => "fallback"
+        })
+        |> Graph.add_step("p1", StepA)
+        |> Graph.add_step("p2", StepA)
+        |> Graph.add_step("p3", StepA)
+        |> Graph.add_step("p4", StepA)
+        |> Graph.add_step("p5", StepA)
+        |> Graph.add_step("p6", StepA)
+        |> Graph.add_step("p7", StepA)
+        |> Graph.add_step("p8", StepA)
+        |> Graph.add_step("fallback", StepA)
+        |> Graph.set_start("start")
+        |> Graph.connect("start", "router")
+
+      # No debería dar error porque safe_branch garantiza :default
+      {:ok, issues} = Graph.validate(graph)
+      refute Enum.any?(issues, &(&1.code in [:complex_branch, :branch_missing_default]))
+    end
+
+    test "next_nodes funciona con safe_branch" do
+      graph =
+        Graph.new()
+        |> Graph.safe_branch("router", fn s -> s.code end, %{
+          :a => "path_a",
+          :b => "path_b",
+          :default => "fallback"
+        })
+        |> Graph.add_step("path_a", StepA)
+        |> Graph.add_step("path_b", StepA)
+        |> Graph.add_step("fallback", StepA)
+
+      assert {:ok, ["path_a"]} = Graph.next_nodes(graph, "router", %{code: :a})
+      assert {:ok, ["path_b"]} = Graph.next_nodes(graph, "router", %{code: :b})
+      assert {:ok, ["fallback"]} = Graph.next_nodes(graph, "router", %{code: :unknown})
+    end
+  end
+
+  # ============================================================================
+  # Tests para pedantic_mode
+  # ============================================================================
+
+  describe "validate/1 - pedantic_mode" do
+    test "pedantic_mode requiere default incluso para branch de 1 opción" do
+      # Branch con 1 sola opción, sin default
+      graph =
+        Graph.new()
+        |> Graph.add_step("start", StartStep)
+        |> Graph.add_branch("single", fn s -> s.status end)
+        |> Graph.add_step("only_path", StepA)
+        |> Graph.set_start("start")
+        |> Graph.connect("start", "single")
+        |> Graph.connect_branch("single", "only_path", :active)
+
+      # Sin pedantic_mode: 1 opción sin default = warning (< 5)
+      {:ok, issues_normal} = Graph.validate(graph)
+      assert Enum.any?(issues_normal, &(&1.code == :branch_without_default))
+      refute Enum.any?(issues_normal, &(&1.code == :branch_missing_default))
+
+      # Con pedantic_mode: 1 opción sin default = error (>= 1)
+      {:error, issues_pedantic} = Graph.validate(graph, pedantic_mode: true)
+      assert Enum.any?(issues_pedantic, &(&1.code == :branch_missing_default))
+    end
+
+    test "pedantic_mode tiene precedencia sobre paranoid_mode" do
+      graph = build_branch_graph()  # 2 opciones sin default
+
+      # Con ambos, pedantic gana (umbral 1)
+      {:error, issues} = Graph.validate(graph, paranoid_mode: true, pedantic_mode: true)
+      error = Enum.find(issues, &(&1.code == :branch_missing_default))
+      assert error != nil
+      # El mensaje debería mencionar el umbral correcto
+      assert error.message =~ "1+"
+    end
+
+    test "pedantic_mode marca branches con 2+ opciones con default como complejos" do
+      # Branch con 2 opciones + default = 3 total
+      graph = build_branch_graph_with_default()
+
+      # Sin pedantic_mode: no es complejo
+      {:ok, issues_normal} = Graph.validate(graph)
+      refute Enum.any?(issues_normal, &(&1.code == :complex_branch))
+
+      # Con pedantic_mode: max_options = 1, así que 3 es complejo
+      {:ok, issues_pedantic} = Graph.validate(graph, pedantic_mode: true)
+      assert Enum.any?(issues_pedantic, &(&1.code == :complex_branch))
+    end
+  end
+
+  # ============================================================================
   # Helpers
   # ============================================================================
 
