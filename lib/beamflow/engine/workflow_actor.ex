@@ -57,6 +57,7 @@ defmodule Beamflow.Engine.WorkflowActor do
   require Logger
 
   alias Beamflow.Engine.Registry, as: WorkflowRegistry
+  alias Beamflow.Storage.WorkflowStore
 
   @typedoc "Identificador único de workflow"
   @type workflow_id :: String.t()
@@ -138,10 +139,10 @@ defmodule Beamflow.Engine.WorkflowActor do
   @spec get_state(workflow_id()) :: {:ok, actor_state()} | {:error, :not_found}
   def get_state(workflow_id) do
     case WorkflowRegistry.lookup(workflow_id) do
-      {:ok, _pid} ->
+      [{pid, _}] when is_pid(pid) ->
         {:ok, GenServer.call(WorkflowRegistry.via_tuple(workflow_id), :get_state)}
 
-      {:error, :not_found} ->
+      [] ->
         {:error, :not_found}
     end
   end
@@ -197,6 +198,10 @@ defmodule Beamflow.Engine.WorkflowActor do
       error: nil
     }
 
+    # Persistir estado inicial y registrar evento
+    persist_state(actor_state)
+    record_event(workflow_id, :workflow_started, %{workflow_module: workflow_module, params: params})
+
     # Iniciar ejecución automática
     {:ok, actor_state, {:continue, :execute_next_step}}
   end
@@ -233,6 +238,12 @@ defmodule Beamflow.Engine.WorkflowActor do
           status: :completed,
           completed_at: DateTime.utc_now()
         }
+
+        # Registrar evento de completado
+        record_event(workflow_id, :workflow_completed, %{
+          total_steps: total,
+          duration_ms: DateTime.diff(new_state.completed_at, new_state.started_at, :millisecond)
+        })
 
         broadcast_update(new_state)
         persist_state(new_state)
@@ -283,11 +294,24 @@ defmodule Beamflow.Engine.WorkflowActor do
   end
 
   defp execute_step(step_module, workflow_module, state) do
-    %{workflow_state: workflow_state, workflow_id: workflow_id} = state
+    %{workflow_state: workflow_state, workflow_id: workflow_id, current_step_index: step_index} = state
+    step_name = inspect(step_module)
+    start_time = System.monotonic_time(:millisecond)
+
+    # Registrar inicio del step
+    record_event(workflow_id, :step_started, %{step: step_name, step_index: step_index})
 
     case step_module.execute(workflow_state) do
       {:ok, updated_workflow_state} ->
-        Logger.debug("Workflow #{workflow_id}: Step #{inspect(step_module)} succeeded")
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+        Logger.debug("Workflow #{workflow_id}: Step #{step_name} succeeded in #{duration_ms}ms")
+
+        # Registrar éxito del step
+        record_event(workflow_id, :step_completed, %{
+          step: step_name,
+          step_index: step_index,
+          duration_ms: duration_ms
+        })
 
         # Llamar al callback de éxito del workflow
         new_workflow_state =
@@ -305,14 +329,23 @@ defmodule Beamflow.Engine.WorkflowActor do
         {:noreply, new_state, {:continue, :execute_next_step}}
 
       {:error, reason} ->
-        Logger.error("Workflow #{workflow_id}: Step #{inspect(step_module)} failed - #{inspect(reason)}")
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+        Logger.error("Workflow #{workflow_id}: Step #{step_name} failed in #{duration_ms}ms - #{inspect(reason)}")
+
+        # Registrar fallo del step
+        record_event(workflow_id, :step_failed, %{
+          step: step_name,
+          step_index: step_index,
+          duration_ms: duration_ms,
+          error: inspect(reason)
+        })
 
         handle_step_error(step_module, reason, workflow_module, state)
     end
   end
 
   defp handle_step_error(step_module, reason, workflow_module, state) do
-    %{workflow_state: workflow_state} = state
+    %{workflow_state: workflow_state, workflow_id: workflow_id} = state
 
     # Llamar al callback de fallo del workflow
     new_workflow_state =
@@ -324,6 +357,12 @@ defmodule Beamflow.Engine.WorkflowActor do
       error: reason,
       completed_at: DateTime.utc_now()
     }
+
+    # Registrar fallo del workflow
+    record_event(workflow_id, :workflow_failed, %{
+      step: inspect(step_module),
+      error: inspect(reason)
+    })
 
     broadcast_update(new_state)
     persist_state(new_state)
@@ -349,10 +388,24 @@ defmodule Beamflow.Engine.WorkflowActor do
     )
   end
 
-  defp persist_state(_state) do
-    # TODO: Implementar persistencia en Mnesia
-    # Beamflow.Workflows.Repo.update(state)
-    :ok
+  defp persist_state(state) do
+    case WorkflowStore.save_workflow(state) do
+      {:ok, _record} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to persist workflow #{state.workflow_id}: #{inspect(reason)}")
+        :ok  # No fallar el workflow por error de persistencia
+    end
+  end
+
+  defp record_event(workflow_id, event_type, data) do
+    case WorkflowStore.record_event(workflow_id, event_type, data) do
+      :ok -> :ok
+      {:error, reason} ->
+        Logger.warning("Failed to record event #{event_type} for #{workflow_id}: #{inspect(reason)}")
+        :ok
+    end
   end
 
   defp summarize_state(state) do

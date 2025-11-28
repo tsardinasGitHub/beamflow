@@ -17,16 +17,30 @@ defmodule Beamflow.Storage.MnesiaSetup do
       # Ejecutar una sola vez para crear schema y tablas
       Beamflow.Storage.MnesiaSetup.install()
 
+      # O al iniciar la aplicación (crea tablas si no existen)
+      Beamflow.Storage.MnesiaSetup.ensure_tables()
+
   ## Tablas
 
-  - `:workflows` - Almacena definiciones y estado de workflows
-    - Atributos: id, status, data, inserted_at, updated_at
+  - `:beamflow_workflows` - Estado de cada workflow
+    - Atributos: id, workflow_module, status, workflow_state, current_step_index,
+      total_steps, started_at, completed_at, error, inserted_at, updated_at
     - Tipo: disc_copies (persistencia en disco)
+    - Índices: status
+
+  - `:beamflow_events` - Historial de eventos de cada workflow
+    - Atributos: id, workflow_id, event_type, data, timestamp
+    - Tipo: disc_copies
+    - Índices: workflow_id, event_type
 
   Ver ADR-001 para justificación detallada de esta decisión arquitectónica.
   """
 
   require Logger
+
+  # Nombres de tablas
+  @workflows_table :beamflow_workflows
+  @events_table :beamflow_events
 
   @doc """
   Instala el schema y tablas de Mnesia.
@@ -46,43 +60,226 @@ defmodule Beamflow.Storage.MnesiaSetup do
   """
   @spec install() :: :ok
   def install do
-    # 1. Create the schema on this node
     nodes = [node()]
 
+    # 1. Detener Mnesia si está corriendo
+    :mnesia.stop()
+
+    # 2. Crear schema
     case :mnesia.create_schema(nodes) do
-      :ok -> Logger.info("Mnesia schema created successfully.")
-      {:error, {node, {:already_exists, node}}} -> Logger.info("Mnesia schema already exists.")
-      {:error, reason} -> Logger.error("Failed to create Mnesia schema: #{inspect(reason)}")
+      :ok ->
+        Logger.info("Mnesia schema created successfully.")
+
+      {:error, {_node, {:already_exists, _}}} ->
+        Logger.info("Mnesia schema already exists.")
+
+      {:error, reason} ->
+        Logger.error("Failed to create Mnesia schema: #{inspect(reason)}")
     end
 
-    # 2. Start Mnesia to create tables
+    # 3. Iniciar Mnesia
     :mnesia.start()
 
-    # 3. Create tables
-    create_workflow_table(nodes)
+    # 4. Crear tablas
+    create_workflows_table(nodes)
+    create_events_table(nodes)
 
-    # 4. Stop Mnesia so it can be started by the Application supervisor later
+    # 5. Esperar a que las tablas estén listas
+    :mnesia.wait_for_tables([@workflows_table, @events_table], 5000)
+
+    Logger.info("Mnesia setup completed. Tables: #{inspect([@workflows_table, @events_table])}")
+
+    # 6. Detener Mnesia para que Application lo inicie
     :mnesia.stop()
+
+    :ok
   end
 
-  defp create_workflow_table(nodes) do
-    # Assuming we store workflows. Adjust attributes as per your Workflow struct.
-    # For now, using a simple structure: {id, state, ...}
-    # We will use :disc_copies for persistence.
+  @doc """
+  Asegura que las tablas existen. Crea las que falten.
 
-    table_name = :workflows
-    # Example attributes
-    attributes = [:id, :status, :data, :inserted_at, :updated_at]
+  Útil para inicialización automática durante el arranque de la aplicación.
+  No requiere detener Mnesia.
 
-    case :mnesia.create_table(table_name, attributes: attributes, disc_copies: nodes) do
-      {:atomic, :ok} ->
-        Logger.info("Table '#{table_name}' created.")
+  ## Retorno
 
-      {:aborted, {:already_exists, _}} ->
-        Logger.info("Table '#{table_name}' already exists.")
+    * `:ok` - Tablas disponibles
+    * `{:error, reason}` - Error al crear tablas
+  """
+  @spec ensure_tables() :: :ok | {:error, term()}
+  def ensure_tables do
+    nodes = [node()]
+    existing_tables = :mnesia.system_info(:tables)
 
-      {:aborted, reason} ->
-        Logger.error("Failed to create table '#{table_name}': #{inspect(reason)}")
+    # Crear tabla de workflows si no existe
+    unless @workflows_table in existing_tables do
+      create_workflows_table(nodes)
+    end
+
+    # Crear tabla de eventos si no existe
+    unless @events_table in existing_tables do
+      create_events_table(nodes)
+    end
+
+    # Esperar a que estén listas
+    case :mnesia.wait_for_tables([@workflows_table, @events_table], 10_000) do
+      :ok ->
+        Logger.info("Mnesia tables ready: #{inspect([@workflows_table, @events_table])}")
+        :ok
+
+      {:timeout, tables} ->
+        Logger.error("Timeout waiting for Mnesia tables: #{inspect(tables)}")
+        {:error, {:timeout, tables}}
+
+      {:error, reason} ->
+        Logger.error("Error waiting for Mnesia tables: #{inspect(reason)}")
+        {:error, reason}
     end
   end
+
+  @doc """
+  Elimina todas las tablas de Beamflow.
+
+  ⚠️ PELIGRO: Esta operación es irreversible.
+
+  ## Retorno
+
+    * `:ok` - Tablas eliminadas
+    * `{:error, reason}` - Error al eliminar
+  """
+  @spec drop_tables() :: :ok | {:error, term()}
+  def drop_tables do
+    results =
+      [@workflows_table, @events_table]
+      |> Enum.map(fn table ->
+        case :mnesia.delete_table(table) do
+          {:atomic, :ok} ->
+            Logger.info("Table #{table} deleted")
+            :ok
+
+          {:aborted, {:no_exists, _}} ->
+            Logger.info("Table #{table} does not exist")
+            :ok
+
+          {:aborted, reason} ->
+            Logger.error("Failed to delete table #{table}: #{inspect(reason)}")
+            {:error, reason}
+        end
+      end)
+
+    if Enum.all?(results, &(&1 == :ok)) do
+      :ok
+    else
+      {:error, :partial_failure}
+    end
+  end
+
+  @doc """
+  Reinicia las tablas (drop + create).
+
+  ⚠️ PELIGRO: Elimina todos los datos existentes.
+  """
+  @spec reset_tables() :: :ok | {:error, term()}
+  def reset_tables do
+    :ok = drop_tables()
+    ensure_tables()
+  end
+
+  # ============================================================================
+  # Funciones Privadas
+  # ============================================================================
+
+  defp create_workflows_table(nodes) do
+    # Atributos del registro de workflow
+    attributes = [
+      :id,
+      :workflow_module,
+      :status,
+      :workflow_state,
+      :current_step_index,
+      :total_steps,
+      :started_at,
+      :completed_at,
+      :error,
+      :inserted_at,
+      :updated_at
+    ]
+
+    # Usar ram_copies en desarrollo para evitar problemas con nodos anónimos
+    # En producción, usar disc_copies con nodos nombrados
+    storage_type = storage_type_for_env()
+
+    table_opts = [
+      attributes: attributes,
+      type: :set
+    ] ++ storage_opts(storage_type, nodes)
+
+    case :mnesia.create_table(@workflows_table, table_opts) do
+      {:atomic, :ok} ->
+        Logger.info("Table '#{@workflows_table}' created with #{storage_type}")
+        create_index(@workflows_table, :status)
+
+      {:aborted, {:already_exists, _}} ->
+        Logger.debug("Table '#{@workflows_table}' already exists")
+
+      {:aborted, reason} ->
+        Logger.error("Failed to create table '#{@workflows_table}': #{inspect(reason)}")
+    end
+  end
+
+  defp create_events_table(nodes) do
+    attributes = [
+      :id,
+      :workflow_id,
+      :event_type,
+      :data,
+      :timestamp
+    ]
+
+    storage_type = storage_type_for_env()
+
+    table_opts = [
+      attributes: attributes,
+      type: :bag  # Múltiples eventos por workflow_id
+    ] ++ storage_opts(storage_type, nodes)
+
+    case :mnesia.create_table(@events_table, table_opts) do
+      {:atomic, :ok} ->
+        Logger.info("Table '#{@events_table}' created with #{storage_type}")
+        create_index(@events_table, :workflow_id)
+        create_index(@events_table, :event_type)
+
+      {:aborted, {:already_exists, _}} ->
+        Logger.debug("Table '#{@events_table}' already exists")
+
+      {:aborted, reason} ->
+        Logger.error("Failed to create table '#{@events_table}': #{inspect(reason)}")
+    end
+  end
+
+  defp create_index(table, attribute) do
+    case :mnesia.add_table_index(table, attribute) do
+      {:atomic, :ok} ->
+        Logger.debug("Index on #{table}.#{attribute} created")
+
+      {:aborted, {:already_exists, _, _}} ->
+        :ok
+
+      {:aborted, reason} ->
+        Logger.warning("Failed to create index on #{table}.#{attribute}: #{inspect(reason)}")
+    end
+  end
+
+  # Determina el tipo de almacenamiento según el entorno
+  defp storage_type_for_env do
+    # Si el nodo no tiene nombre (nonode@nohost), usamos ram_copies
+    # porque disc_copies requiere un nodo nombrado
+    case node() do
+      :nonode@nohost -> :ram_copies
+      _ -> :disc_copies
+    end
+  end
+
+  defp storage_opts(:ram_copies, nodes), do: [ram_copies: nodes]
+  defp storage_opts(:disc_copies, nodes), do: [disc_copies: nodes]
 end

@@ -7,10 +7,13 @@ defmodule Beamflow.Application do
 
   require Logger
 
+  alias Beamflow.Storage.MnesiaSetup
+
   @impl true
   def start(_type, _args) do
-    # Iniciar Mnesia antes que cualquier supervisor
+    # Iniciar Mnesia y asegurar tablas antes que cualquier supervisor
     start_mnesia()
+    ensure_mnesia_tables()
 
     children = [
       BeamflowWeb.Telemetry,
@@ -38,12 +41,25 @@ defmodule Beamflow.Application do
         :ok
 
       {:error, {:already_started, _}} ->
-        Logger.info("Mnesia already started")
+        Logger.debug("Mnesia already started")
         :ok
 
       {:error, reason} ->
         Logger.error("Failed to start Mnesia: #{inspect(reason)}")
         raise "Could not start Mnesia: #{inspect(reason)}"
+    end
+  end
+
+  defp ensure_mnesia_tables do
+    case MnesiaSetup.ensure_tables() do
+      :ok ->
+        Logger.info("Mnesia tables ready")
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Could not ensure Mnesia tables: #{inspect(reason)}")
+        # No fallar el arranque, las tablas pueden crearse después
+        :ok
     end
   end
 
