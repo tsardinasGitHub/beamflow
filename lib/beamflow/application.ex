@@ -24,6 +24,10 @@ defmodule Beamflow.Application do
       Beamflow.Engine.AlertSystem,
       # Dead Letter Queue for failed workflows
       Beamflow.Engine.DeadLetterQueue,
+      # Chaos Monkey for resilience testing (disabled by default)
+      Beamflow.Chaos.ChaosMonkey,
+      # Idempotency Validator for chaos testing
+      Beamflow.Chaos.IdempotencyValidator,
       # Route Loader for dynamic dispatch branches
       Beamflow.Workflows.RouteLoader,
       # Registry for Workflows
