@@ -30,6 +30,9 @@ defmodule BeamflowWeb.Router do
 
     # Centro de Control de Chaos Engineering
     live "/chaos", ChaosLive
+
+    # Dashboard de Analytics - Métricas y tendencias
+    live "/analytics", AnalyticsLive
   end
 
   # Other scopes may use custom stacks.
