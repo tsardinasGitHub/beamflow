@@ -51,12 +51,21 @@ defmodule BeamflowWeb.WorkflowGraphLive do
         show_all_attempts: false,
         step_timings: %{},
         step_attempts: [],
-        all_events: []
+        all_events: [],
+        # Estado del modo de reproducción
+        replay_mode: false,
+        replay_playing: false,
+        replay_speed: 1.0,
+        replay_current_index: 0,
+        replay_timeline: [],
+        replay_state_at_index: nil,
+        replay_timer_ref: nil
       )
       |> load_workflow(id)
       |> load_all_events(id)
       |> load_step_timings_from_events()
       |> build_graph_data()
+      |> build_replay_timeline()
 
     {:ok, socket}
   end
@@ -69,6 +78,33 @@ defmodule BeamflowWeb.WorkflowGraphLive do
       |> build_graph_data()
 
     {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info(:replay_tick, socket) do
+    if socket.assigns.replay_playing do
+      timeline = socket.assigns.replay_timeline
+      current = socket.assigns.replay_current_index
+      max_index = length(timeline) - 1
+
+      if current < max_index do
+        new_index = current + 1
+
+        socket =
+          socket
+          |> assign(replay_current_index: new_index)
+          |> apply_replay_state(new_index)
+          |> schedule_next_tick()
+
+        {:noreply, socket}
+      else
+        # Llegamos al final
+        socket = stop_replay_timer(socket)
+        {:noreply, assign(socket, replay_playing: false)}
+      end
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl true
@@ -128,6 +164,159 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     {:noreply, push_event(socket, "export_svg", %{filename: "workflow-#{socket.assigns.workflow_id}.svg"})}
   end
 
+  # ============================================================================
+  # Replay Mode Event Handlers
+  # ============================================================================
+
+  @impl true
+  def handle_event("toggle_replay_mode", _params, socket) do
+    if socket.assigns.replay_mode do
+      # Salir del modo replay
+      socket = stop_replay_timer(socket)
+      socket =
+        socket
+        |> assign(
+          replay_mode: false,
+          replay_playing: false,
+          replay_current_index: 0,
+          replay_state_at_index: nil
+        )
+        |> build_graph_data()  # Restaurar estado real
+
+      {:noreply, socket}
+    else
+      # Entrar al modo replay
+      timeline = socket.assigns.replay_timeline
+
+      if length(timeline) > 0 do
+        socket =
+          socket
+          |> assign(
+            replay_mode: true,
+            replay_playing: false,
+            replay_current_index: 0
+          )
+          |> apply_replay_state(0)
+
+        {:noreply, socket}
+      else
+        {:noreply, put_flash(socket, :error, "No hay eventos para reproducir")}
+      end
+    end
+  end
+
+  @impl true
+  def handle_event("replay_play_pause", _params, socket) do
+    if socket.assigns.replay_playing do
+      # Pausar
+      socket = stop_replay_timer(socket)
+      {:noreply, assign(socket, replay_playing: false)}
+    else
+      # Reproducir
+      socket = start_replay_timer(socket)
+      {:noreply, assign(socket, replay_playing: true)}
+    end
+  end
+
+  @impl true
+  def handle_event("replay_step_forward", _params, socket) do
+    timeline = socket.assigns.replay_timeline
+    current = socket.assigns.replay_current_index
+    max_index = length(timeline) - 1
+
+    if current < max_index do
+      socket =
+        socket
+        |> assign(replay_current_index: current + 1)
+        |> apply_replay_state(current + 1)
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("replay_step_back", _params, socket) do
+    current = socket.assigns.replay_current_index
+
+    if current > 0 do
+      socket =
+        socket
+        |> assign(replay_current_index: current - 1)
+        |> apply_replay_state(current - 1)
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("replay_go_start", _params, socket) do
+    socket =
+      socket
+      |> stop_replay_timer()
+      |> assign(replay_current_index: 0, replay_playing: false)
+      |> apply_replay_state(0)
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("replay_go_end", _params, socket) do
+    timeline = socket.assigns.replay_timeline
+    max_index = max(0, length(timeline) - 1)
+
+    socket =
+      socket
+      |> stop_replay_timer()
+      |> assign(replay_current_index: max_index, replay_playing: false)
+      |> apply_replay_state(max_index)
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("replay_seek", %{"index" => index_str}, socket) do
+    index = String.to_integer(index_str)
+    timeline = socket.assigns.replay_timeline
+    max_index = length(timeline) - 1
+    clamped_index = max(0, min(index, max_index))
+
+    socket =
+      socket
+      |> assign(replay_current_index: clamped_index)
+      |> apply_replay_state(clamped_index)
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("replay_set_speed", %{"speed" => speed_str}, socket) do
+    speed = String.to_float(speed_str)
+
+    socket =
+      socket
+      |> assign(replay_speed: speed)
+      |> restart_replay_timer_if_playing()
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("replay_jump_to_event", %{"index" => index_str}, socket) do
+    index = String.to_integer(index_str)
+
+    socket =
+      socket
+      |> stop_replay_timer()
+      |> assign(replay_current_index: index, replay_playing: false)
+      |> apply_replay_state(index)
+
+    {:noreply, socket}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -157,6 +346,23 @@ defmodule BeamflowWeb.WorkflowGraphLive do
 
           <%= if @workflow do %>
             <div class="flex items-center gap-3">
+              <!-- Replay Mode Toggle -->
+              <button
+                phx-click="toggle_replay_mode"
+                class={"flex items-center gap-2 px-4 py-2 border rounded-lg transition-colors #{if @replay_mode, do: "bg-amber-600/50 border-amber-500/50 text-amber-200", else: "bg-purple-600/30 hover:bg-purple-600/50 border-purple-500/30 text-purple-200"}"}
+                title={if @replay_mode, do: "Salir del modo reproducción", else: "Modo reproducción"}
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <%= if @replay_mode do %>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                  <% else %>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  <% end %>
+                </svg>
+                <%= if @replay_mode, do: "Salir", else: "Replay" %>
+              </button>
+
               <button
                 phx-click="export_svg"
                 class="flex items-center gap-2 px-4 py-2 bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/30 rounded-lg text-purple-200 transition-colors"
@@ -171,6 +377,24 @@ defmodule BeamflowWeb.WorkflowGraphLive do
             </div>
           <% end %>
         </div>
+
+        <!-- Replay Mode Banner -->
+        <%= if @replay_mode do %>
+          <div class="bg-amber-900/30 border-b border-amber-500/30 px-6 py-3">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <span class="text-amber-400 animate-pulse">🎬</span>
+                <span class="text-amber-200 font-medium">Modo Reproducción</span>
+                <span class="text-amber-400/70 text-sm">
+                  Navegando por <%= length(@replay_timeline) %> eventos
+                </span>
+              </div>
+              <div class="text-amber-300/70 text-sm">
+                Evento <%= @replay_current_index + 1 %> de <%= length(@replay_timeline) %>
+              </div>
+            </div>
+          </div>
+        <% end %>
       </div>
 
       <!-- Graph Container -->
@@ -468,6 +692,17 @@ defmodule BeamflowWeb.WorkflowGraphLive do
         <% end %>
       </div>
 
+      <!-- Replay Control Panel -->
+      <%= if @replay_mode and length(@replay_timeline) > 0 do %>
+        <.replay_control_panel
+          timeline={@replay_timeline}
+          current_index={@replay_current_index}
+          playing={@replay_playing}
+          speed={@replay_speed}
+          replay_state={@replay_state_at_index}
+        />
+      <% end %>
+
       <!-- Legend -->
       <div class="px-6 pb-6">
         <div class="bg-slate-800/30 backdrop-blur-sm rounded-xl border border-white/10 p-4">
@@ -644,6 +879,255 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     </div>
     """
   end
+
+  # ============================================================================
+  # Replay Control Panel Component
+  # ============================================================================
+
+  attr :timeline, :list, required: true
+  attr :current_index, :integer, required: true
+  attr :playing, :boolean, required: true
+  attr :speed, :float, required: true
+  attr :replay_state, :map, default: nil
+
+  defp replay_control_panel(assigns) do
+    timeline = assigns.timeline
+    current = assigns.current_index
+    max_index = max(0, length(timeline) - 1)
+    progress = if max_index > 0, do: current / max_index * 100, else: 0
+
+    current_event = Enum.at(timeline, current)
+
+    # Encontrar marcadores (eventos importantes)
+    markers = timeline
+    |> Enum.filter(& &1.is_marker)
+    |> Enum.map(& %{index: &1.index, severity: &1.severity, description: &1.description})
+
+    assigns = assign(assigns,
+      max_index: max_index,
+      progress: progress,
+      current_event: current_event,
+      markers: markers,
+      speeds: [0.25, 0.5, 1.0, 2.0, 4.0]
+    )
+
+    ~H"""
+    <div class="px-6 pb-4">
+      <div class="bg-slate-800/70 backdrop-blur-sm rounded-2xl border border-amber-500/30 p-4">
+        <!-- Current Event Display -->
+        <div class="mb-4 p-3 bg-slate-900/50 rounded-lg border border-slate-700/50">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <span class={[
+                "w-3 h-3 rounded-full",
+                event_severity_color(@current_event && @current_event.severity)
+              ]}></span>
+              <span class="text-white font-medium">
+                <%= if @current_event, do: @current_event.description, else: "Sin evento" %>
+              </span>
+            </div>
+            <span class="text-slate-400 text-sm">
+              <%= if @current_event && @current_event.timestamp do %>
+                <%= format_replay_timestamp(@current_event.timestamp) %>
+              <% end %>
+            </span>
+          </div>
+        </div>
+
+        <!-- Timeline Scrubber -->
+        <div class="mb-4">
+          <div class="relative h-8 bg-slate-700/50 rounded-lg overflow-hidden">
+            <!-- Progress bar -->
+            <div
+              class="absolute left-0 top-0 h-full bg-gradient-to-r from-amber-500/50 to-amber-400/50 transition-all duration-150"
+              style={"width: #{@progress}%"}
+            ></div>
+
+            <!-- Markers -->
+            <%= for marker <- @markers do %>
+              <button
+                phx-click="replay_jump_to_event"
+                phx-value-index={marker.index}
+                class={[
+                  "absolute top-1 bottom-1 w-1.5 rounded-full z-10 hover:w-2 transition-all cursor-pointer",
+                  marker_color(marker.severity)
+                ]}
+                style={"left: #{marker.index / max(@max_index, 1) * 100}%"}
+                title={marker.description}
+              ></button>
+            <% end %>
+
+            <!-- Clickable area for seeking -->
+            <input
+              type="range"
+              min="0"
+              max={@max_index}
+              value={@current_index}
+              phx-change="replay_seek"
+              phx-value-index={@current_index}
+              class="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+            />
+
+            <!-- Current position indicator -->
+            <div
+              class="absolute top-0 bottom-0 w-0.5 bg-white shadow-lg shadow-white/50"
+              style={"left: #{@progress}%"}
+            ></div>
+          </div>
+
+          <!-- Time labels -->
+          <div class="flex justify-between text-xs text-slate-500 mt-1">
+            <span>Inicio</span>
+            <span>Evento <%= @current_index + 1 %> / <%= @max_index + 1 %></span>
+            <span>Fin</span>
+          </div>
+        </div>
+
+        <!-- Playback Controls -->
+        <div class="flex items-center justify-center gap-4">
+          <!-- Go to start -->
+          <button
+            phx-click="replay_go_start"
+            class="p-2 text-slate-400 hover:text-white transition-colors"
+            title="Ir al inicio"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+            </svg>
+          </button>
+
+          <!-- Step back -->
+          <button
+            phx-click="replay_step_back"
+            class="p-2 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+            disabled={@current_index == 0}
+            title="Evento anterior"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+            </svg>
+          </button>
+
+          <!-- Play/Pause -->
+          <button
+            phx-click="replay_play_pause"
+            class="p-4 bg-amber-500 hover:bg-amber-400 rounded-full text-slate-900 transition-colors"
+            title={if @playing, do: "Pausar", else: "Reproducir"}
+          >
+            <%= if @playing do %>
+              <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+              </svg>
+            <% else %>
+              <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            <% end %>
+          </button>
+
+          <!-- Step forward -->
+          <button
+            phx-click="replay_step_forward"
+            class="p-2 text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+            disabled={@current_index >= @max_index}
+            title="Siguiente evento"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+
+          <!-- Go to end -->
+          <button
+            phx-click="replay_go_end"
+            class="p-2 text-slate-400 hover:text-white transition-colors"
+            title="Ir al final"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+            </svg>
+          </button>
+
+          <!-- Speed selector -->
+          <div class="ml-6 flex items-center gap-2">
+            <span class="text-slate-500 text-sm">Velocidad:</span>
+            <div class="flex gap-1">
+              <%= for spd <- @speeds do %>
+                <button
+                  phx-click="replay_set_speed"
+                  phx-value-speed={spd}
+                  class={[
+                    "px-2 py-1 text-xs rounded transition-colors",
+                    if(@speed == spd,
+                      do: "bg-amber-500 text-slate-900 font-medium",
+                      else: "bg-slate-700 text-slate-300 hover:bg-slate-600"
+                    )
+                  ]}
+                >
+                  <%= spd %>x
+                </button>
+              <% end %>
+            </div>
+          </div>
+        </div>
+
+        <!-- Event Timeline List (collapsible) -->
+        <details class="mt-4">
+          <summary class="cursor-pointer text-slate-400 hover:text-white text-sm flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+            </svg>
+            Ver todos los eventos (<%= length(@timeline) %>)
+          </summary>
+
+          <div class="mt-3 max-h-48 overflow-y-auto space-y-1">
+            <%= for event <- @timeline do %>
+              <button
+                phx-click="replay_jump_to_event"
+                phx-value-index={event.index}
+                class={[
+                  "w-full text-left p-2 rounded-lg text-sm flex items-center gap-3 transition-colors",
+                  if(event.index == @current_index,
+                    do: "bg-amber-500/20 border border-amber-500/30",
+                    else: "hover:bg-slate-700/50"
+                  )
+                ]}
+              >
+                <span class={[
+                  "w-2 h-2 rounded-full flex-shrink-0",
+                  event_severity_color(event.severity)
+                ]}></span>
+                <span class={[
+                  "flex-1 truncate",
+                  if(event.index == @current_index, do: "text-white", else: "text-slate-300")
+                ]}>
+                  <%= event.description %>
+                </span>
+                <span class="text-slate-500 text-xs flex-shrink-0">
+                  <%= format_replay_timestamp(event.timestamp) %>
+                </span>
+              </button>
+            <% end %>
+          </div>
+        </details>
+      </div>
+    </div>
+    """
+  end
+
+  defp event_severity_color(:error), do: "bg-red-500"
+  defp event_severity_color(:warning), do: "bg-amber-500"
+  defp event_severity_color(:success), do: "bg-green-500"
+  defp event_severity_color(_), do: "bg-blue-500"
+
+  defp marker_color(:error), do: "bg-red-500"
+  defp marker_color(:warning), do: "bg-amber-500"
+  defp marker_color(_), do: "bg-purple-500"
+
+  defp format_replay_timestamp(%DateTime{} = dt) do
+    Calendar.strftime(dt, "%H:%M:%S.") <> String.pad_leading("#{dt.microsecond |> elem(0) |> div(1000)}", 3, "0")
+  end
+  defp format_replay_timestamp(_), do: "--:--:--"
 
   # ============================================================================
   # Funciones Privadas
@@ -1074,4 +1558,237 @@ defmodule BeamflowWeb.WorkflowGraphLive do
   defp edge_animation_class(%{active: true}), do: "graph-edge-active"
   defp edge_animation_class(%{completed: true}), do: "graph-edge-completed"
   defp edge_animation_class(_), do: ""
+
+  # ============================================================================
+  # Replay Mode Functions
+  # ============================================================================
+
+  @doc false
+  defp build_replay_timeline(socket) do
+    events = socket.assigns.all_events || []
+
+    # Filtrar eventos relevantes para el replay y ordenar por timestamp
+    timeline_events = events
+    |> Enum.filter(fn event ->
+      event.event_type in [
+        :workflow_started,
+        :step_started,
+        :step_completed,
+        :step_failed,
+        :step_retry,
+        :compensation_started,
+        :compensation_completed,
+        :compensation_failed,
+        :workflow_completed,
+        :workflow_failed
+      ]
+    end)
+    |> Enum.sort_by(& &1.timestamp)
+    |> Enum.with_index()
+    |> Enum.map(fn {event, index} ->
+      %{
+        index: index,
+        event: event,
+        timestamp: event.timestamp,
+        event_type: event.event_type,
+        step_index: event.metadata[:step_index],
+        description: describe_event(event),
+        severity: event_severity(event.event_type),
+        is_marker: is_marker_event?(event.event_type)
+      }
+    end)
+
+    assign(socket, :replay_timeline, timeline_events)
+  end
+
+  defp describe_event(event) do
+    step_info = if event.metadata[:step_index] do
+      step_module = event.metadata[:step_module]
+      step_name = if step_module, do: format_step_label(step_module), else: "Step #{event.metadata[:step_index]}"
+      " - #{step_name}"
+    else
+      ""
+    end
+
+    case event.event_type do
+      :workflow_started -> "🚀 Workflow iniciado"
+      :step_started -> "▶️ Step iniciado#{step_info}"
+      :step_completed -> "✅ Step completado#{step_info}"
+      :step_failed -> "❌ Step fallido#{step_info}"
+      :step_retry -> "🔄 Retry#{step_info}"
+      :compensation_started -> "⏪ Compensación iniciada#{step_info}"
+      :compensation_completed -> "✅ Compensación completada#{step_info}"
+      :compensation_failed -> "❌ Compensación fallida#{step_info}"
+      :workflow_completed -> "🎉 Workflow completado"
+      :workflow_failed -> "💥 Workflow fallido"
+      _ -> "📋 #{event.event_type}"
+    end
+  end
+
+  defp event_severity(:step_failed), do: :error
+  defp event_severity(:compensation_failed), do: :error
+  defp event_severity(:workflow_failed), do: :error
+  defp event_severity(:step_retry), do: :warning
+  defp event_severity(:compensation_started), do: :warning
+  defp event_severity(:step_completed), do: :success
+  defp event_severity(:compensation_completed), do: :success
+  defp event_severity(:workflow_completed), do: :success
+  defp event_severity(_), do: :info
+
+  defp is_marker_event?(:step_failed), do: true
+  defp is_marker_event?(:workflow_failed), do: true
+  defp is_marker_event?(:step_retry), do: true
+  defp is_marker_event?(:compensation_started), do: true
+  defp is_marker_event?(_), do: false
+
+  defp apply_replay_state(socket, index) do
+    timeline = socket.assigns.replay_timeline
+
+    if index >= 0 and index < length(timeline) do
+      # Reconstruir el estado del workflow hasta este punto
+      events_up_to_now = Enum.take(timeline, index + 1)
+      replay_state = build_state_from_events(events_up_to_now, socket.assigns.workflow)
+
+      socket
+      |> assign(:replay_state_at_index, replay_state)
+      |> rebuild_nodes_for_replay(replay_state)
+    else
+      socket
+    end
+  end
+
+  defp build_state_from_events(timeline_events, _original_workflow) do
+    # Empezar con estado inicial
+    initial_state = %{
+      status: :pending,
+      current_step_index: 0,
+      step_states: %{},  # %{step_index => :pending | :running | :completed | :failed}
+      compensating: false,
+      last_event: nil
+    }
+
+    Enum.reduce(timeline_events, initial_state, fn timeline_entry, state ->
+      event = timeline_entry.event
+      step_index = event.metadata[:step_index]
+
+      case event.event_type do
+        :workflow_started ->
+          %{state | status: :running, last_event: timeline_entry}
+
+        :step_started when is_integer(step_index) ->
+          step_states = Map.put(state.step_states, step_index, :running)
+          %{state | step_states: step_states, current_step_index: step_index, last_event: timeline_entry}
+
+        :step_completed when is_integer(step_index) ->
+          step_states = Map.put(state.step_states, step_index, :completed)
+          %{state | step_states: step_states, current_step_index: step_index + 1, last_event: timeline_entry}
+
+        :step_failed when is_integer(step_index) ->
+          step_states = Map.put(state.step_states, step_index, :failed)
+          %{state | step_states: step_states, current_step_index: step_index, last_event: timeline_entry}
+
+        :step_retry when is_integer(step_index) ->
+          step_states = Map.put(state.step_states, step_index, :running)
+          %{state | step_states: step_states, last_event: timeline_entry}
+
+        :compensation_started ->
+          %{state | compensating: true, last_event: timeline_entry}
+
+        :compensation_completed when is_integer(step_index) ->
+          step_states = Map.put(state.step_states, step_index, :compensated)
+          %{state | step_states: step_states, last_event: timeline_entry}
+
+        :workflow_completed ->
+          %{state | status: :completed, last_event: timeline_entry}
+
+        :workflow_failed ->
+          %{state | status: :failed, last_event: timeline_entry}
+
+        _ ->
+          %{state | last_event: timeline_entry}
+      end
+    end)
+  end
+
+  defp rebuild_nodes_for_replay(socket, replay_state) do
+    # Reconstruir los nodos con el estado del replay
+    workflow = socket.assigns.workflow
+
+    if workflow do
+      graph = get_workflow_graph(workflow.workflow_module)
+      step_timings = socket.assigns[:step_timings] || %{}
+
+      # Construir nodos con estados del replay
+      nodes = graph.nodes
+      |> Map.values()
+      |> Enum.filter(&(&1.type == :step))
+      |> Enum.sort_by(& &1.id)
+      |> Enum.with_index()
+      |> Enum.map(fn {node, index} ->
+        # Obtener estado del replay o calcular basado en posición
+        state = case Map.get(replay_state.step_states, index) do
+          nil ->
+            if index < replay_state.current_step_index, do: :completed, else: :pending
+          :compensated -> :compensated
+          s -> s
+        end
+
+        timing = Map.get(step_timings, index, %{})
+        x = @padding + index * @node_spacing_x
+        y = @padding
+        tooltip = build_tooltip(state, timing)
+
+        %{
+          id: node.id,
+          index: index,
+          label: format_step_label(node.module),
+          module: format_module_full(node.module),
+          state: state,
+          x: x,
+          y: y,
+          width: @node_width,
+          height: @node_height,
+          timing: timing,
+          tooltip: tooltip
+        }
+      end)
+
+      # Reconstruir edges
+      edges = build_edges(graph, nodes)
+
+      assign(socket, nodes: nodes, edges: edges)
+    else
+      socket
+    end
+  end
+
+  defp start_replay_timer(socket) do
+    # Calcular intervalo basado en velocidad (base 500ms por evento)
+    interval = round(500 / socket.assigns.replay_speed)
+    timer_ref = Process.send_after(self(), :replay_tick, interval)
+    assign(socket, :replay_timer_ref, timer_ref)
+  end
+
+  defp stop_replay_timer(socket) do
+    if socket.assigns.replay_timer_ref do
+      Process.cancel_timer(socket.assigns.replay_timer_ref)
+    end
+    assign(socket, :replay_timer_ref, nil)
+  end
+
+  defp schedule_next_tick(socket) do
+    interval = round(500 / socket.assigns.replay_speed)
+    timer_ref = Process.send_after(self(), :replay_tick, interval)
+    assign(socket, :replay_timer_ref, timer_ref)
+  end
+
+  defp restart_replay_timer_if_playing(socket) do
+    if socket.assigns.replay_playing do
+      socket
+      |> stop_replay_timer()
+      |> start_replay_timer()
+    else
+      socket
+    end
+  end
 end
