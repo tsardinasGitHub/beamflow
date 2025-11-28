@@ -59,6 +59,7 @@ defmodule Beamflow.Engine.WorkflowActor do
   alias Beamflow.Engine.Idempotency
   alias Beamflow.Engine.Registry, as: WorkflowRegistry
   alias Beamflow.Engine.Retry
+  alias Beamflow.Engine.Saga
   alias Beamflow.Storage.WorkflowStore
   alias Beamflow.Workflows.{Builder, Graph}
 
@@ -208,6 +209,8 @@ defmodule Beamflow.Engine.WorkflowActor do
       current_node_id: current_node_id,
       has_branching: has_branching,
       executed_nodes: [],
+      # Saga: tracking de steps ejecutados para compensación
+      executed_saga_steps: [],
       # Estado general
       status: :pending,
       started_at: DateTime.utc_now(),
@@ -552,6 +555,15 @@ defmodule Beamflow.Engine.WorkflowActor do
     new_workflow_state =
       workflow_module.handle_step_success(step_module, updated_workflow_state)
 
+    # Registrar para Saga si el step soporta compensación
+    new_saga_steps =
+      if Saga.saga_enabled?(step_module) do
+        saga_record = Saga.record_execution(step_module, [], updated_workflow_state)
+        [saga_record | state.executed_saga_steps]
+      else
+        state.executed_saga_steps
+      end
+
     # Obtener siguiente nodo del grafo
     next_node_id =
       case Graph.next_nodes(graph, current_node_id, new_workflow_state) do
@@ -565,7 +577,8 @@ defmodule Beamflow.Engine.WorkflowActor do
       workflow_state: new_workflow_state,
       current_step_index: state.current_step_index + 1,
       current_node_id: next_node_id,
-      executed_nodes: [current_node_id | executed_nodes]
+      executed_nodes: [current_node_id | executed_nodes],
+      executed_saga_steps: new_saga_steps
     }
 
     broadcast_update(new_state)
@@ -576,7 +589,37 @@ defmodule Beamflow.Engine.WorkflowActor do
   end
 
   defp handle_step_error(step_module, reason, workflow_module, state) do
-    %{workflow_state: workflow_state, workflow_id: workflow_id} = state
+    %{workflow_state: workflow_state, workflow_id: workflow_id, executed_saga_steps: saga_steps} = state
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SAGA COMPENSATION - Ejecutar compensaciones en orden inverso
+    # ══════════════════════════════════════════════════════════════════════════
+    compensation_results =
+      if Enum.any?(saga_steps) do
+        Logger.warning("Workflow #{workflow_id}: Executing #{length(saga_steps)} compensation(s)...")
+
+        record_event(workflow_id, :saga_compensation_started, %{
+          failed_step: inspect(step_module),
+          steps_to_compensate: Enum.map(saga_steps, & inspect(&1.module))
+        })
+
+        on_compensate = fn module, result ->
+          record_event(workflow_id, :saga_step_compensated, %{
+            step: inspect(module),
+            result: inspect(result)
+          })
+        end
+
+        results = Saga.compensate(saga_steps, workflow_state, on_compensate: on_compensate)
+
+        record_event(workflow_id, :saga_compensation_completed, %{
+          results: Enum.map(results, &inspect/1)
+        })
+
+        results
+      else
+        []
+      end
 
     # Llamar al callback de fallo del workflow
     new_workflow_state =
@@ -592,7 +635,8 @@ defmodule Beamflow.Engine.WorkflowActor do
     # Registrar fallo del workflow
     record_event(workflow_id, :workflow_failed, %{
       step: inspect(step_module),
-      error: inspect(reason)
+      error: inspect(reason),
+      compensations_executed: length(compensation_results)
     })
 
     broadcast_update(new_state)

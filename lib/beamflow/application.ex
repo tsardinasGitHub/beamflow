@@ -18,6 +18,8 @@ defmodule Beamflow.Application do
     children = [
       BeamflowWeb.Telemetry,
       {Phoenix.PubSub, name: Beamflow.PubSub},
+      # Registry for Circuit Breakers
+      {Registry, keys: :unique, name: Beamflow.CircuitBreakerRegistry},
       # Route Loader for dynamic dispatch branches
       Beamflow.Workflows.RouteLoader,
       # Registry for Workflows

@@ -68,6 +68,7 @@ defmodule Beamflow.Engine.Retry do
 
   require Logger
 
+  alias Beamflow.Engine.CircuitBreaker
   alias Beamflow.Engine.Idempotency
 
   # ============================================================================
@@ -227,7 +228,7 @@ defmodule Beamflow.Engine.Retry do
 
     * `:on_retry` - Callback llamado antes de cada retry `fn attempt, delay, error -> :ok end`
     * `:on_exhausted` - Callback cuando se agotan los intentos
-    * `:circuit_breaker` - Módulo de circuit breaker (futuro)
+    * `:circuit_breaker` - Nombre del circuit breaker a consultar (átomo)
 
   ## Retorno
 
@@ -299,6 +300,28 @@ defmodule Beamflow.Engine.Retry do
   defp do_attempt(step_module, workflow_state, workflow_id, policy, opts, retry_state, attempt, idempotency_key) do
     step_name = inspect(step_module)
 
+    # Verificar Circuit Breaker si está configurado
+    circuit_breaker = opts[:circuit_breaker]
+
+    if circuit_breaker && not circuit_breaker_allows?(circuit_breaker) do
+      Logger.warning("[Retry] #{step_name}: Circuit breaker #{circuit_breaker} is OPEN, failing fast")
+
+      updated_retry_state = %{
+        retry_state
+        | attempt: attempt,
+          last_error: :circuit_open,
+          errors: [:circuit_open | retry_state.errors]
+      }
+
+      {:error, :circuit_open, updated_retry_state}
+    else
+      do_execute_attempt(step_module, workflow_state, workflow_id, policy, opts, retry_state, attempt, idempotency_key, circuit_breaker)
+    end
+  end
+
+  defp do_execute_attempt(step_module, workflow_state, workflow_id, policy, opts, retry_state, attempt, idempotency_key, circuit_breaker) do
+    step_name = inspect(step_module)
+
     # Inyectar información de retry en el estado
     enriched_state =
       workflow_state
@@ -313,12 +336,18 @@ defmodule Beamflow.Engine.Retry do
         # Éxito - marcar como completado
         Idempotency.complete_step(idempotency_key, updated_state)
 
+        # Reportar éxito al circuit breaker
+        if circuit_breaker, do: CircuitBreaker.report_success(circuit_breaker)
+
         final_retry_state = %{retry_state | attempt: attempt}
         {:ok, updated_state, final_retry_state}
 
       {:error, reason} ->
         # Fallo - evaluar si reintentamos
         Idempotency.fail_step(idempotency_key, reason)
+
+        # Reportar fallo al circuit breaker
+        if circuit_breaker, do: CircuitBreaker.report_failure(circuit_breaker, reason)
 
         updated_retry_state = %{
           retry_state
@@ -441,6 +470,14 @@ defmodule Beamflow.Engine.Retry do
   defp extract_error_atom(%{type: type}) when is_atom(type), do: type
   defp extract_error_atom(%{reason: reason}) when is_atom(reason), do: reason
   defp extract_error_atom(_), do: :unknown
+
+  # ============================================================================
+  # Circuit Breaker Integration
+  # ============================================================================
+
+  defp circuit_breaker_allows?(breaker_name) do
+    CircuitBreaker.allow?(breaker_name)
+  end
 
   # ============================================================================
   # Utilidades
