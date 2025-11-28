@@ -53,14 +53,33 @@ graph TD
 -   Erlang/OTP 26+
 
 ### 1. Clone and Setup
+```bash
 git clone https://github.com/tsardinasGitHub/beamflow.git
 cd beamflow
-mix deps.get### 2. Run the Cluster
+mix deps.get
+```
+
+### 2. Initialize Mnesia Database
+Before running the application for the first time, create the Mnesia schema and tables:
+```bash
+mix run -e "Beamflow.Storage.MnesiaSetup.install()"
+```
+
+This command:
+- Creates the Mnesia schema on the current node
+- Initializes the `:workflows` table with disc_copies for persistence
+- Only needs to be run once (subsequent runs will skip if already exists)
+
+### 3. Run the Cluster
 Start the application in an IEx shell:
-iex -S mix phx.server### 3. Access the Dashboard
+```bash
+iex -S mix phx.server
+```
+
+### 4. Access the Dashboard
 Open `http://localhost:4000` to see the Real-Time Workflow Dashboard.
 
-### 4. Unleash Chaos 💥
+### 5. Unleash Chaos 💥
 Toggle the **"Enable Chaos Mode"** switch in the UI. You will see processes crashing in the logs, but the "Success Rate" metric will remain stable as OTP recovers them.
 
 ---

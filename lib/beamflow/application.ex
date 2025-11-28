@@ -5,8 +5,13 @@ defmodule Beamflow.Application do
 
   use Application
 
+  require Logger
+
   @impl true
   def start(_type, _args) do
+    # Iniciar Mnesia antes que cualquier supervisor
+    start_mnesia()
+
     children = [
       BeamflowWeb.Telemetry,
       {Phoenix.PubSub, name: Beamflow.PubSub},
@@ -24,6 +29,22 @@ defmodule Beamflow.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: Beamflow.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp start_mnesia do
+    case :mnesia.start() do
+      :ok ->
+        Logger.info("Mnesia started successfully")
+        :ok
+
+      {:error, {:already_started, _}} ->
+        Logger.info("Mnesia already started")
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Failed to start Mnesia: #{inspect(reason)}")
+        raise "Could not start Mnesia: #{inspect(reason)}"
+    end
   end
 
   # Tell Phoenix to update the endpoint configuration
