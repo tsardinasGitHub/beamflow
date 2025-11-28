@@ -8,7 +8,24 @@
 
 ## 🚀 Inicio Rápido (1 minuto)
 
-### Opción A: Demo Automática (Recomendada)
+### Opción A: Modo Demo desde la UI ⭐ (Recomendada)
+
+1. Iniciar la aplicación:
+```bash
+iex -S mix phx.server
+```
+
+2. Navegar a **http://localhost:4000/demo**
+
+3. En la interfaz puedes:
+   - 🖱️ Click en **"Crear Workflow"** para generar uno individual
+   - 📦 Usar el slider y click en **"Crear X Workflows"** para lotes
+   - 💥 Activar **Chaos Mode** con un toggle
+   - 📊 Ver estadísticas en tiempo real
+
+> 💡 **Ideal para reclutadores**: No requiere conocer comandos de terminal
+
+### Opción B: Demo Automática (Terminal)
 
 ```bash
 # Iniciar la aplicación
@@ -24,7 +41,7 @@ El script:
 - ✅ Activa Chaos Mode para demostrar resiliencia
 - ✅ Muestra instrucciones de navegación
 
-### Opción B: Demo Manual
+### Opción C: Demo Manual
 
 Sigue los pasos detallados a continuación.
 

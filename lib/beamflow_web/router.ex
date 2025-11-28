@@ -39,6 +39,9 @@ defmodule BeamflowWeb.Router do
 
     # Dashboard de Analytics - Métricas y tendencias
     live "/analytics", AnalyticsLive
+
+    # Modo Demo - Generador de workflows para evaluadores
+    live "/demo", DemoModeLive
   end
 
   # API REST para exportación programática (con rate limiting)

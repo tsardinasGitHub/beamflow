@@ -6,13 +6,40 @@
 
 ---
 
+## 🤖 QA Automático (Recomendado primero)
+
+Antes de ejecutar el checklist manual, ejecuta el script automático:
+
+```bash
+# Verificación completa (requiere app corriendo)
+mix run scripts/qa_check.exs
+
+# Con detalles
+mix run scripts/qa_check.exs --verbose
+
+# Solo secciones específicas
+mix run scripts/qa_check.exs --section smoke   # Infraestructura
+mix run scripts/qa_check.exs --section api     # Endpoints REST
+mix run scripts/qa_check.exs --section workflows  # Workflows
+mix run scripts/qa_check.exs --section chaos   # Chaos Mode
+```
+
+El script verifica automáticamente:
+- ✅ Compilación y Mnesia
+- ✅ PubSub y Supervisores
+- ✅ Endpoints API con headers de rate limit
+- ✅ Creación y estado de workflows
+- ✅ ChaosMonkey start/stop/profiles
+
+---
+
 ## 📋 Pre-requisitos
 
 - [ ] Aplicación iniciada con `mix phx.server`
 - [ ] Mnesia inicializado (tablas creadas)
 - [ ] Navegador abierto en `http://localhost:4000`
-- [ ] Terminal con IEx disponible para comandos
-- [ ] Script de demo ejecutado: `mix run scripts/demo_setup.exs --count 20`
+- [ ] QA automático ejecutado: `mix run scripts/qa_check.exs`
+- [ ] Datos de demo creados desde `/demo` o con script
 
 ---
 
@@ -215,6 +242,39 @@ Verificación rápida de que nada está roto.
 
 ---
 
+## 🎬 Demo Mode (5 min)
+
+### Acceso y Navegación
+
+| # | Test | Pasos | Esperado | ✅ |
+|---|------|-------|----------|---|
+| 8.1 | Acceso directo | Navegar a `/demo` | Página Demo Mode carga | ☐ |
+| 8.2 | Título visible | Ver header | "🎬 BeamFlow Demo Mode" | ☐ |
+| 8.3 | Presets visibles | Ver panel izquierdo | 5 botones preset | ☐ |
+| 8.4 | Log visible | Ver panel derecho | Área de log actividad | ☐ |
+
+### Generación de Workflows
+
+| # | Test | Pasos | Esperado | ✅ |
+|---|------|-------|----------|---|
+| 8.5 | Inicio Rápido | Click "🚀 Inicio Rápido" | 1 workflow creado | ☐ |
+| 8.6 | Lote x10 | Click "📦 Lote x10" | 10 workflows creados | ☐ |
+| 8.7 | Modo Chaos | Click "💥 Modo Chaos" | 5 workflows + chaos | ☐ |
+| 8.8 | Demo Completa | Click "🎭 Demo Completa" | 20 workflows | ☐ |
+| 8.9 | Stress Test | Click "🔥 Stress Test" | 50+ workflows | ☐ |
+
+### Funcionalidad
+
+| # | Test | Pasos | Esperado | ✅ |
+|---|------|-------|----------|---|
+| 8.10 | Toggle Chaos | Activar/desactivar chaos | Switch funciona | ☐ |
+| 8.11 | Contador workflows | Crear workflows | Contador incrementa | ☐ |
+| 8.12 | Log actualiza | Ejecutar preset | Log muestra acciones | ☐ |
+| 8.13 | Navegación Explorer | Click "Ver Explorer" | Redirige correctamente | ☐ |
+| 8.14 | Workflows visibles | Ir a Explorer | Workflows de demo aparecen | ☐ |
+
+---
+
 ## 🐛 Edge Cases (5 min)
 
 | # | Test | Pasos | Esperado | ✅ |
@@ -250,8 +310,9 @@ Verificación rápida de que nada está roto.
 | Analytics | 14 | ☐ | ☐ | |
 | API REST | 9 | ☐ | ☐ | |
 | Chaos Mode | 10 | ☐ | ☐ | |
+| Demo Mode | 14 | ☐ | ☐ | |
 | Edge Cases | 6 | ☐ | ☐ | |
-| **TOTAL** | **92** | ☐ | ☐ | |
+| **TOTAL** | **106** | ☐ | ☐ | |
 
 ---
 
@@ -280,4 +341,4 @@ Verificación rápida de que nada está roto.
 
 ---
 
-> **Recordatorio**: Este checklist complementa pero NO reemplaza los 334 tests automatizados. Ejecutar `mix test` antes de QA manual.
+> **Recordatorio**: Este checklist complementa pero NO reemplaza los 334 tests automatizados. Ejecutar `mix test` antes de QA manual. También recomendamos ejecutar `mix run scripts/qa_check.exs` primero para validación automática.

@@ -36,8 +36,9 @@ BEAMFlow includes a comprehensive visual dashboard:
 | **Details** | Event timeline with retry history | [View](docs/images/dashboard-details.png) |
 | **Graph** | Interactive SVG workflow visualization | [View](docs/images/dashboard-graph.png) |
 | **Analytics** | KPIs, trends, and data export | [View](docs/images/dashboard-analytics.png) |
+| **Demo Mode** | Generate test workflows from UI | [http://localhost:4000/demo](http://localhost:4000/demo) |
 
-> 📸 *Para generar datos de demo: `mix run scripts/demo_setup.exs --count 15`*
+> 📸 *Para generar datos de demo: visita `/demo` o ejecuta `mix run scripts/demo_setup.exs --count 15`*
 
 ### Replay Mode 🎬
 
@@ -133,7 +134,15 @@ iex -S mix phx.server
 Open `http://localhost:4000` to see the Real-Time Workflow Dashboard.
 
 ### 5. Quick Demo Setup 🚀
-Generate sample workflows automatically:
+
+**Option A: From the UI (Recommended for evaluators)**
+
+Navigate to `http://localhost:4000/demo` to:
+- Generate workflows with one click
+- Toggle Chaos Mode visually
+- See real-time statistics
+
+**Option B: From terminal**
 ```bash
 # Create 10 demo workflows
 mix run scripts/demo_setup.exs
@@ -143,6 +152,18 @@ mix run scripts/demo_setup.exs --count 20 --chaos
 
 # See all options
 mix run scripts/demo_setup.exs --help
+```
+
+### 6. Run QA Checks (Optional)
+```bash
+# Verify all system components
+mix run scripts/qa_check.exs
+
+# Verbose mode
+mix run scripts/qa_check.exs --verbose
+
+# Check only API endpoints
+mix run scripts/qa_check.exs --section api
 ```
 
 ### 6. Unleash Chaos 💥
