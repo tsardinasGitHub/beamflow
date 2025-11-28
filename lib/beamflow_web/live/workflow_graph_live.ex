@@ -48,6 +48,7 @@ defmodule BeamflowWeb.WorkflowGraphLive do
         workflow_id: id,
         selected_node: nil,
         show_details: false,
+        show_all_attempts: false,
         step_timings: %{},
         step_attempts: [],
         all_events: []
@@ -73,7 +74,7 @@ defmodule BeamflowWeb.WorkflowGraphLive do
   @impl true
   def handle_event("select_node", %{"node-id" => node_id}, socket) do
     node = Enum.find(socket.assigns.nodes, &(&1.id == node_id))
-    
+
     # Cargar historial de intentos para este step desde todos los eventos
     step_attempts = if node do
       get_step_attempts_from_events(socket.assigns.all_events, node.index)
@@ -94,7 +95,12 @@ defmodule BeamflowWeb.WorkflowGraphLive do
 
   @impl true
   def handle_event("close_details", _params, socket) do
-    {:noreply, assign(socket, show_details: false)}
+    {:noreply, assign(socket, show_details: false, show_all_attempts: false)}
+  end
+
+  @impl true
+  def handle_event("toggle_all_attempts", _params, socket) do
+    {:noreply, assign(socket, :show_all_attempts, not socket.assigns.show_all_attempts)}
   end
 
   @impl true
@@ -403,43 +409,41 @@ defmodule BeamflowWeb.WorkflowGraphLive do
               <!-- Historial de Intentos -->
               <%= if length(@step_attempts) > 0 do %>
                 <div class="mt-4 pt-4 border-t border-white/10">
-                  <label class="text-xs text-slate-400 uppercase tracking-wider">Historial de Intentos</label>
-                  <p class="text-slate-500 text-xs mt-1 mb-3">
-                    <%= length(@step_attempts) %> intento(s) registrado(s)
-                  </p>
-                  
-                  <div class="space-y-2 max-h-48 overflow-y-auto custom-scrollbar">
-                    <%= for {attempt, idx} <- Enum.with_index(@step_attempts, 1) do %>
-                      <div class={[
-                        "p-2 rounded-lg text-xs",
-                        if(attempt.success, do: "bg-green-500/10 border border-green-500/20", else: "bg-red-500/10 border border-red-500/20")
-                      ]}>
-                        <div class="flex items-center justify-between mb-1">
-                          <span class="font-medium text-white">
-                            <%= if attempt.success do %>✅<% else %>❌<% end %>
-                            Intento #<%= idx %>
-                          </span>
-                          <span class={if attempt.success, do: "text-green-400", else: "text-red-400"}>
-                            <%= format_attempt_duration(attempt.duration_ms) %>
-                          </span>
-                        </div>
-                        
-                        <div class="text-slate-400">
-                          <span><%= format_attempt_time(attempt.started_at) %></span>
-                          <%= if attempt.ended_at do %>
-                            <span class="mx-1">→</span>
-                            <span><%= format_attempt_time(attempt.ended_at) %></span>
-                          <% end %>
-                        </div>
-                        
-                        <%= if attempt.error do %>
-                          <div class="mt-1 text-red-300 font-mono text-xs truncate" title={inspect(attempt.error)}>
-                            <%= truncate_attempt_error(attempt.error) %>
-                          </div>
-                        <% end %>
-                      </div>
+                  <div class="flex items-center justify-between mb-2">
+                    <label class="text-xs text-slate-400 uppercase tracking-wider">Historial de Intentos</label>
+                    <%= if length(@step_attempts) > 1 do %>
+                      <.attempts_summary attempts={@step_attempts} />
                     <% end %>
                   </div>
+
+                  <%= if length(@step_attempts) > 5 and not @show_all_attempts do %>
+                    <!-- Resumen colapsado -->
+                    <div class="mb-3">
+                      <.retry_block_summary attempts={@step_attempts} />
+                      <button
+                        phx-click="toggle_all_attempts"
+                        class="mt-2 w-full text-center text-xs text-purple-400 hover:text-purple-300 py-1 border border-purple-500/30 rounded-lg hover:bg-purple-500/10 transition-colors"
+                      >
+                        Ver los <%= length(@step_attempts) %> intentos detallados ↓
+                      </button>
+                    </div>
+                  <% else %>
+                    <!-- Lista detallada -->
+                    <div class="space-y-2 max-h-64 overflow-y-auto custom-scrollbar">
+                      <%= for {attempt, idx} <- Enum.with_index(@step_attempts, 1) do %>
+                        <.attempt_card attempt={attempt} index={idx} />
+                      <% end %>
+                    </div>
+
+                    <%= if length(@step_attempts) > 5 do %>
+                      <button
+                        phx-click="toggle_all_attempts"
+                        class="mt-2 w-full text-center text-xs text-slate-400 hover:text-slate-300 py-1"
+                      >
+                        Colapsar ↑
+                      </button>
+                    <% end %>
+                  <% end %>
                 </div>
               <% else %>
                 <%= if @selected_node.timing != %{} do %>
@@ -537,6 +541,110 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     """
   end
 
+  # Resumen de intentos (éxitos/fallos)
+  attr :attempts, :list, required: true
+
+  defp attempts_summary(assigns) do
+    success_count = Enum.count(assigns.attempts, & &1.success)
+    fail_count = length(assigns.attempts) - success_count
+
+    assigns = assign(assigns, success_count: success_count, fail_count: fail_count)
+
+    ~H"""
+    <div class="flex items-center gap-2 text-xs">
+      <%= if @success_count > 0 do %>
+        <span class="text-green-400">✅ <%= @success_count %></span>
+      <% end %>
+      <%= if @fail_count > 0 do %>
+        <span class="text-red-400">❌ <%= @fail_count %></span>
+      <% end %>
+    </div>
+    """
+  end
+
+  # Bloque de resumen de reintentos (vista colapsada)
+  attr :attempts, :list, required: true
+
+  defp retry_block_summary(assigns) do
+    attempts = assigns.attempts
+    total_duration = attempts |> Enum.map(& &1.duration_ms || 0) |> Enum.sum()
+    first_start = attempts |> List.first() |> Map.get(:started_at)
+    last_end = attempts |> List.last() |> then(& &1.ended_at || &1.started_at)
+    success_count = Enum.count(attempts, & &1.success)
+    fail_count = length(attempts) - success_count
+
+    assigns = assign(assigns,
+      total_duration: total_duration,
+      first_start: first_start,
+      last_end: last_end,
+      success_count: success_count,
+      fail_count: fail_count,
+      total: length(attempts)
+    )
+
+    ~H"""
+    <div class="p-3 bg-slate-700/50 rounded-lg border border-slate-600/50 text-xs">
+      <div class="flex items-center justify-between mb-2">
+        <span class="text-white font-medium">🔄 <%= @total %> intentos</span>
+        <span class="text-slate-300"><%= format_attempt_duration(@total_duration) %> total</span>
+      </div>
+
+      <!-- Barra de progreso visual -->
+      <div class="h-2 bg-slate-600 rounded-full overflow-hidden flex mb-2">
+        <%= if @fail_count > 0 do %>
+          <div class="bg-red-500 h-full" style={"width: #{@fail_count / @total * 100}%"}></div>
+        <% end %>
+        <%= if @success_count > 0 do %>
+          <div class="bg-green-500 h-full" style={"width: #{@success_count / @total * 100}%"}></div>
+        <% end %>
+      </div>
+
+      <div class="flex justify-between text-slate-400">
+        <span><%= format_attempt_time(@first_start) %></span>
+        <span>→</span>
+        <span><%= format_attempt_time(@last_end) %></span>
+      </div>
+    </div>
+    """
+  end
+
+  # Card individual de intento
+  attr :attempt, :map, required: true
+  attr :index, :integer, required: true
+
+  defp attempt_card(assigns) do
+    ~H"""
+    <div class={[
+      "p-2 rounded-lg text-xs",
+      if(@attempt.success, do: "bg-green-500/10 border border-green-500/20", else: "bg-red-500/10 border border-red-500/20")
+    ]}>
+      <div class="flex items-center justify-between mb-1">
+        <span class="font-medium text-white">
+          <%= if @attempt.success do %>✅<% else %>❌<% end %>
+          Intento #<%= @index %>
+        </span>
+        <span class={if @attempt.success, do: "text-green-400", else: "text-red-400"}>
+          <%= format_attempt_duration(@attempt.duration_ms) %>
+        </span>
+      </div>
+
+      <div class="text-slate-400">
+        <span><%= format_attempt_time(@attempt.started_at) %></span>
+        <%= if @attempt.ended_at do %>
+          <span class="mx-1">→</span>
+          <span><%= format_attempt_time(@attempt.ended_at) %></span>
+        <% end %>
+      </div>
+
+      <%= if @attempt.error do %>
+        <div class="mt-1 text-red-300 font-mono text-xs truncate" title={inspect(@attempt.error)}>
+          <%= truncate_attempt_error(@attempt.error) %>
+        </div>
+      <% end %>
+    </div>
+    """
+  end
+
   # ============================================================================
   # Funciones Privadas
   # ============================================================================
@@ -620,7 +728,7 @@ defmodule BeamflowWeb.WorkflowGraphLive do
   defp build_attempts_from_events([%{event_type: :step_started} = start | rest], attempts) do
     # Buscar el siguiente completed o failed
     {end_event, remaining} = find_end_event(rest)
-    
+
     attempt = %{
       started_at: start.timestamp,
       ended_at: end_event && end_event.timestamp,
@@ -628,7 +736,7 @@ defmodule BeamflowWeb.WorkflowGraphLive do
       success: end_event && end_event.event_type == :step_completed,
       error: end_event && end_event.metadata[:reason]
     }
-    
+
     build_attempts_from_events(remaining, [attempt | attempts])
   end
   defp build_attempts_from_events([_ | rest], attempts) do
