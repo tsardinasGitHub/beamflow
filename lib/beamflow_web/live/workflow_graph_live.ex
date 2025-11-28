@@ -48,10 +48,13 @@ defmodule BeamflowWeb.WorkflowGraphLive do
         workflow_id: id,
         selected_node: nil,
         show_details: false,
-        step_timings: %{}
+        step_timings: %{},
+        step_attempts: [],
+        all_events: []
       )
       |> load_workflow(id)
-      |> load_step_timings(id)
+      |> load_all_events(id)
+      |> load_step_timings_from_events()
       |> build_graph_data()
 
     {:ok, socket}
@@ -70,10 +73,21 @@ defmodule BeamflowWeb.WorkflowGraphLive do
   @impl true
   def handle_event("select_node", %{"node-id" => node_id}, socket) do
     node = Enum.find(socket.assigns.nodes, &(&1.id == node_id))
+    
+    # Cargar historial de intentos para este step desde todos los eventos
+    step_attempts = if node do
+      get_step_attempts_from_events(socket.assigns.all_events, node.index)
+    else
+      []
+    end
 
     socket =
       socket
-      |> assign(selected_node: node, show_details: true)
+      |> assign(
+        selected_node: node,
+        show_details: true,
+        step_attempts: step_attempts
+      )
 
     {:noreply, socket}
   end
@@ -240,7 +254,7 @@ defmodule BeamflowWeb.WorkflowGraphLive do
                 >
                   <!-- SVG Tooltip -->
                   <title><%= node.tooltip %></title>
-                  
+
                   <!-- Node background -->
                   <rect
                     x={node.x}
@@ -385,6 +399,66 @@ defmodule BeamflowWeb.WorkflowGraphLive do
                   </p>
                 </div>
               <% end %>
+
+              <!-- Historial de Intentos -->
+              <%= if length(@step_attempts) > 0 do %>
+                <div class="mt-4 pt-4 border-t border-white/10">
+                  <label class="text-xs text-slate-400 uppercase tracking-wider">Historial de Intentos</label>
+                  <p class="text-slate-500 text-xs mt-1 mb-3">
+                    <%= length(@step_attempts) %> intento(s) registrado(s)
+                  </p>
+                  
+                  <div class="space-y-2 max-h-48 overflow-y-auto custom-scrollbar">
+                    <%= for {attempt, idx} <- Enum.with_index(@step_attempts, 1) do %>
+                      <div class={[
+                        "p-2 rounded-lg text-xs",
+                        if(attempt.success, do: "bg-green-500/10 border border-green-500/20", else: "bg-red-500/10 border border-red-500/20")
+                      ]}>
+                        <div class="flex items-center justify-between mb-1">
+                          <span class="font-medium text-white">
+                            <%= if attempt.success do %>✅<% else %>❌<% end %>
+                            Intento #<%= idx %>
+                          </span>
+                          <span class={if attempt.success, do: "text-green-400", else: "text-red-400"}>
+                            <%= format_attempt_duration(attempt.duration_ms) %>
+                          </span>
+                        </div>
+                        
+                        <div class="text-slate-400">
+                          <span><%= format_attempt_time(attempt.started_at) %></span>
+                          <%= if attempt.ended_at do %>
+                            <span class="mx-1">→</span>
+                            <span><%= format_attempt_time(attempt.ended_at) %></span>
+                          <% end %>
+                        </div>
+                        
+                        <%= if attempt.error do %>
+                          <div class="mt-1 text-red-300 font-mono text-xs truncate" title={inspect(attempt.error)}>
+                            <%= truncate_attempt_error(attempt.error) %>
+                          </div>
+                        <% end %>
+                      </div>
+                    <% end %>
+                  </div>
+                </div>
+              <% else %>
+                <%= if @selected_node.timing != %{} do %>
+                  <div class="mt-4 pt-4 border-t border-white/10">
+                    <label class="text-xs text-slate-400 uppercase tracking-wider">Timing</label>
+                    <div class="mt-2 text-sm text-slate-300 space-y-1">
+                      <%= if @selected_node.timing[:started_at] do %>
+                        <p>Inicio: <%= format_attempt_time(@selected_node.timing.started_at) %></p>
+                      <% end %>
+                      <%= if @selected_node.timing[:completed_at] do %>
+                        <p>Fin: <%= format_attempt_time(@selected_node.timing.completed_at) %></p>
+                      <% end %>
+                      <%= if @selected_node.timing[:duration_ms] do %>
+                        <p>Duración: <%= format_attempt_duration(@selected_node.timing.duration_ms) %></p>
+                      <% end %>
+                    </div>
+                  </div>
+                <% end %>
+              <% end %>
             </div>
           </div>
         <% end %>
@@ -481,21 +555,27 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     assign(socket, :workflow, workflow)
   end
 
-  defp load_step_timings(socket, workflow_id) do
+  # Cargar todos los eventos para consultas posteriores
+  defp load_all_events(socket, workflow_id) do
     events = case WorkflowStore.get_events(workflow_id) do
       {:ok, events} -> events
       {:error, _} -> []
     end
+    assign(socket, :all_events, events)
+  end
 
-    # Agrupar eventos por step_index para obtener timing
+  # Procesar timings desde eventos ya cargados
+  defp load_step_timings_from_events(socket) do
+    events = socket.assigns[:all_events] || []
+
     timings = events
     |> Enum.reduce(%{}, fn event, acc ->
       step_index = event.metadata[:step_index]
-      
+
       case {event.event_type, step_index} do
         {:step_started, idx} when is_integer(idx) ->
           Map.update(acc, idx, %{started_at: event.timestamp}, &Map.put(&1, :started_at, event.timestamp))
-        
+
         {:step_completed, idx} when is_integer(idx) ->
           duration = event.metadata[:duration_ms] || 0
           Map.update(acc, idx, %{completed_at: event.timestamp, duration_ms: duration}, fn existing ->
@@ -503,7 +583,7 @@ defmodule BeamflowWeb.WorkflowGraphLive do
             |> Map.put(:completed_at, event.timestamp)
             |> Map.put(:duration_ms, duration)
           end)
-        
+
         {:step_failed, idx} when is_integer(idx) ->
           duration = event.metadata[:duration_ms] || 0
           error = event.metadata[:reason] || "Unknown error"
@@ -513,13 +593,84 @@ defmodule BeamflowWeb.WorkflowGraphLive do
             |> Map.put(:duration_ms, duration)
             |> Map.put(:error, error)
           end)
-        
+
         _ -> acc
       end
     end)
 
     assign(socket, :step_timings, timings)
   end
+
+  # Obtener intentos detallados desde todos los eventos
+  defp get_step_attempts_from_events(all_events, step_index) when is_list(all_events) do
+    # Filtrar eventos del step específico
+    step_events = all_events
+    |> Enum.filter(fn event ->
+      event.metadata[:step_index] == step_index and
+      event.event_type in [:step_started, :step_completed, :step_failed]
+    end)
+    |> Enum.sort_by(& &1.timestamp)
+
+    # Reconstruir intentos emparejando started con completed/failed
+    build_attempts_from_events(step_events, [])
+  end
+  defp get_step_attempts_from_events(_, _), do: []
+
+  defp build_attempts_from_events([], attempts), do: Enum.reverse(attempts)
+  defp build_attempts_from_events([%{event_type: :step_started} = start | rest], attempts) do
+    # Buscar el siguiente completed o failed
+    {end_event, remaining} = find_end_event(rest)
+    
+    attempt = %{
+      started_at: start.timestamp,
+      ended_at: end_event && end_event.timestamp,
+      duration_ms: end_event && end_event.metadata[:duration_ms],
+      success: end_event && end_event.event_type == :step_completed,
+      error: end_event && end_event.metadata[:reason]
+    }
+    
+    build_attempts_from_events(remaining, [attempt | attempts])
+  end
+  defp build_attempts_from_events([_ | rest], attempts) do
+    # Ignorar eventos que no son step_started
+    build_attempts_from_events(rest, attempts)
+  end
+
+  defp find_end_event([]), do: {nil, []}
+  defp find_end_event([%{event_type: type} = event | rest]) when type in [:step_completed, :step_failed] do
+    {event, rest}
+  end
+  defp find_end_event([_ | rest]), do: find_end_event(rest)
+
+  # Formateo para intentos
+  defp format_attempt_duration(nil), do: "-"
+  defp format_attempt_duration(ms) when ms < 1000, do: "#{ms}ms"
+  defp format_attempt_duration(ms) when ms < 60_000 do
+    seconds = Float.round(ms / 1000, 2)
+    "#{seconds}s"
+  end
+  defp format_attempt_duration(ms) do
+    minutes = div(ms, 60_000)
+    seconds = Float.round(rem(ms, 60_000) / 1000, 1)
+    "#{minutes}m #{seconds}s"
+  end
+
+  defp format_attempt_time(nil), do: "-"
+  defp format_attempt_time(%DateTime{} = dt) do
+    Calendar.strftime(dt, "%H:%M:%S")
+  end
+  defp format_attempt_time(timestamp) when is_binary(timestamp), do: timestamp
+  defp format_attempt_time(_), do: "-"
+
+  defp truncate_attempt_error(nil), do: nil
+  defp truncate_attempt_error(error) when is_binary(error) do
+    if String.length(error) > 40 do
+      String.slice(error, 0, 37) <> "..."
+    else
+      error
+    end
+  end
+  defp truncate_attempt_error(error), do: inspect(error) |> truncate_attempt_error()
 
   defp build_graph_data(socket) do
     case socket.assigns.workflow do
@@ -529,7 +680,7 @@ defmodule BeamflowWeb.WorkflowGraphLive do
       workflow ->
         # Obtener el grafo del workflow
         graph = get_workflow_graph(workflow.workflow_module)
-        
+
         # Obtener timings para los nodos
         step_timings = socket.assigns[:step_timings] || %{}
 
@@ -599,13 +750,13 @@ defmodule BeamflowWeb.WorkflowGraphLive do
 
   defp build_tooltip(state, timing) do
     lines = ["Estado: #{state_to_text(state)}"]
-    
+
     lines = if timing[:started_at] do
       lines ++ ["Inicio: #{format_timestamp(timing.started_at)}"]
     else
       lines
     end
-    
+
     lines = if timing[:completed_at] do
       lines ++ ["Fin: #{format_timestamp(timing.completed_at)}"]
     else
@@ -615,35 +766,35 @@ defmodule BeamflowWeb.WorkflowGraphLive do
         lines
       end
     end
-    
+
     lines = if timing[:duration_ms] do
       lines ++ ["Duración: #{format_duration(timing.duration_ms)}"]
     else
       lines
     end
-    
+
     lines = if timing[:error] do
       lines ++ ["Error: #{truncate_error(timing.error)}"]
     else
       lines
     end
-    
+
     Enum.join(lines, "\n")
   end
-  
+
   defp state_to_text(:pending), do: "Pendiente"
   defp state_to_text(:running), do: "Ejecutando"
   defp state_to_text(:completed), do: "Completado"
   defp state_to_text(:failed), do: "Fallido"
   defp state_to_text(_), do: "Desconocido"
-  
+
   defp format_timestamp(nil), do: "-"
   defp format_timestamp(timestamp) when is_binary(timestamp), do: timestamp
   defp format_timestamp(%DateTime{} = dt) do
     Calendar.strftime(dt, "%H:%M:%S")
   end
   defp format_timestamp(_), do: "-"
-  
+
   defp format_duration(nil), do: "-"
   defp format_duration(ms) when ms < 1000, do: "#{ms}ms"
   defp format_duration(ms) when ms < 60_000 do
@@ -655,7 +806,7 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     seconds = rem(ms, 60_000) / 1000
     "#{minutes}m #{:erlang.float_to_binary(seconds, decimals: 1)}s"
   end
-  
+
   defp truncate_error(error) when is_binary(error) do
     if String.length(error) > 30 do
       String.slice(error, 0, 27) <> "..."
