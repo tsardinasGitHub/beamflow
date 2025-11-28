@@ -204,6 +204,87 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
     |> Enum.reverse()
   end
 
+  @doc """
+  Genera datos para un heatmap semanal estilo GitHub.
+
+  Retorna 7 semanas × 7 días = 49 celdas con intensidad de actividad.
+  """
+  @spec weekly_heatmap() :: [map()]
+  def weekly_heatmap do
+    today = Date.utc_today()
+    # 7 semanas hacia atrás, 7 días cada una
+    days = for week <- 0..6, day <- 0..6 do
+      days_ago = week * 7 + day
+      date = Date.add(today, -days_ago)
+      {week, day, date}
+    end
+
+    # Obtener conteos por fecha
+    counts = get_daily_counts(49)
+
+    days
+    |> Enum.map(fn {week, day_of_week, date} ->
+      count = Map.get(counts, date, 0)
+      %{
+        week: week,
+        day: day_of_week,
+        date: date,
+        count: count,
+        intensity: intensity_level(count, counts)
+      }
+    end)
+    |> Enum.reverse()
+  end
+
+  @doc """
+  Genera sparkline data para las últimas N horas.
+
+  Útil para mini-gráficos en tarjetas KPI.
+  """
+  @spec sparkline_data(atom(), integer()) :: [integer()]
+  def sparkline_data(metric, hours \\ 12) do
+    now = DateTime.utc_now()
+
+    0..(hours - 1)
+    |> Enum.map(fn hours_ago ->
+      hour_start = DateTime.add(now, -hours_ago * 3600, :second)
+      hour_end = DateTime.add(hour_start, 3600, :second)
+
+      case metric do
+        :completed -> count_workflows_by_status_in_range(hour_start, hour_end).completed
+        :failed -> count_workflows_by_status_in_range(hour_start, hour_end).failed
+        :total -> count_workflows_in_range(hour_start, hour_end)
+        _ -> 0
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp get_daily_counts(days) do
+    today = Date.utc_today()
+
+    0..(days - 1)
+    |> Enum.map(fn days_ago ->
+      date = Date.add(today, -days_ago)
+      day_start = DateTime.new!(date, ~T[00:00:00], "Etc/UTC")
+      day_end = DateTime.add(day_start, 86400, :second)
+      count = count_workflows_in_range(day_start, day_end)
+      {date, count}
+    end)
+    |> Map.new()
+  end
+
+  defp intensity_level(count, counts) do
+    max_count = counts |> Map.values() |> Enum.max(fn -> 1 end) |> max(1)
+    cond do
+      count == 0 -> 0
+      count <= max_count * 0.25 -> 1
+      count <= max_count * 0.5 -> 2
+      count <= max_count * 0.75 -> 3
+      true -> 4
+    end
+  end
+
   # ============================================================================
   # Métricas por Módulo
   # ============================================================================
@@ -291,6 +372,12 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
       performance: performance_metrics(),
       hourly_trend: hourly_trend(),
       daily_trend: daily_trend(),
+      weekly_heatmap: weekly_heatmap(),
+      sparklines: %{
+        completed: sparkline_data(:completed, 12),
+        failed: sparkline_data(:failed, 12),
+        total: sparkline_data(:total, 12)
+      },
       by_module: by_module(),
       step_performance: step_performance() |> Enum.take(10),
       recent_failures: recent_failures(limit: 5),
@@ -302,12 +389,15 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
 
   @doc """
   Exporta métricas en formato estructurado para JSON/CSV.
+
+  Incluye un disclaimer si los datos están muestreados.
   """
   @spec export_metrics(keyword()) :: map()
   def export_metrics(opts \\ []) do
     metrics = dashboard_metrics(opts)
+    is_sampled = metrics.is_sampled
 
-    %{
+    base_export = %{
       exported_at: DateTime.utc_now(),
       period: Keyword.get(opts, :period, :all),
       summary: metrics.summary,
@@ -317,6 +407,19 @@ defmodule Beamflow.Analytics.WorkflowAnalytics do
       step_performance: step_performance(),
       recent_failures: recent_failures(limit: 20)
     }
+
+    if is_sampled do
+      Map.merge(base_export, %{
+        _disclaimer: "⚠️ DATOS MUESTREADOS: Las métricas de este reporte se calcularon sobre una muestra representativa de #{@max_sample_size} registros para optimizar el rendimiento. Los valores pueden variar ligeramente respecto al total real.",
+        _sample_info: %{
+          is_sampled: true,
+          sample_size: @max_sample_size,
+          note: "Para datos completos, considere exportar en períodos más cortos o contacte al administrador."
+        }
+      })
+    else
+      Map.put(base_export, :_sample_info, %{is_sampled: false, sample_size: nil})
+    end
   end
 
   # ============================================================================

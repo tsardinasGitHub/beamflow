@@ -35,6 +35,8 @@ defmodule BeamflowWeb.AnalyticsLive do
       |> assign(last_updated: DateTime.utc_now())
       |> assign(filter_range: :all)
       |> assign(is_sampled: false)
+      |> assign(sparklines: %{completed: [], failed: [], total: []})
+      |> assign(weekly_heatmap: [])
       |> load_all_metrics()
 
     {:ok, socket}
@@ -85,6 +87,13 @@ defmodule BeamflowWeb.AnalyticsLive do
 
   defp format_export(data, :json), do: Jason.encode!(data, pretty: true)
   defp format_export(data, :csv) do
+    # Disclaimer si hay sampling
+    disclaimer = if Map.get(data, :_disclaimer) do
+      "# #{data._disclaimer}\n# Muestra: #{data._sample_info.sample_size} registros\n\n"
+    else
+      ""
+    end
+
     # CSV del summary
     summary_csv = "Metric,Value\n" <>
       Enum.map_join(data.summary, "\n", fn {k, v} -> "#{k},#{v}" end)
@@ -93,7 +102,7 @@ defmodule BeamflowWeb.AnalyticsLive do
     perf_csv = "\n\nPerformance Metric,Value\n" <>
       Enum.map_join(data.performance, "\n", fn {k, v} -> "#{k},#{v}" end)
 
-    summary_csv <> perf_csv
+    disclaimer <> summary_csv <> perf_csv
   end
 
   defp mime_type(:json), do: "application/json"
@@ -224,27 +233,30 @@ defmodule BeamflowWeb.AnalyticsLive do
           </div>
         <% end %>
 
-        <!-- KPIs Row -->
+        <!-- KPIs Row with Sparklines -->
         <section>
           <h2 class="text-lg font-semibold text-slate-300 mb-4">📊 Resumen General</h2>
           <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
-            <.kpi_card
+            <.kpi_card_with_sparkline
               label="Total"
               value={@summary.total}
               icon="📋"
               color="slate"
+              sparkline={@sparklines.total}
             />
-            <.kpi_card
+            <.kpi_card_with_sparkline
               label="Completados"
               value={@summary.completed}
               icon="✅"
               color="green"
+              sparkline={@sparklines.completed}
             />
-            <.kpi_card
+            <.kpi_card_with_sparkline
               label="Fallidos"
               value={@summary.failed}
               icon="❌"
               color="red"
+              sparkline={@sparklines.failed}
             />
             <.kpi_card
               label="En Progreso"
@@ -261,6 +273,12 @@ defmodule BeamflowWeb.AnalyticsLive do
             <.success_rate_card rate={@summary.success_rate} />
             <.failure_rate_card rate={@summary.failure_rate} />
           </div>
+        </section>
+
+        <!-- Activity Heatmap -->
+        <section class="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6">
+          <h3 class="text-lg font-semibold text-white mb-4">🗓️ Actividad (Últimas 7 semanas)</h3>
+          <.activity_heatmap data={@weekly_heatmap} />
         </section>
 
         <!-- Charts Row -->
@@ -346,6 +364,139 @@ defmodule BeamflowWeb.AnalyticsLive do
       <div class="text-sm text-slate-400"><%= @label %></div>
     </div>
     """
+  end
+
+  # KPI Card with Sparkline
+  attr :label, :string, required: true
+  attr :value, :integer, required: true
+  attr :icon, :string, required: true
+  attr :color, :string, required: true
+  attr :sparkline, :list, required: true
+
+  defp kpi_card_with_sparkline(assigns) do
+    bg = case assigns.color do
+      "green" -> "from-emerald-600/20 to-emerald-800/10 border-emerald-500/30"
+      "red" -> "from-red-600/20 to-red-800/10 border-red-500/30"
+      "blue" -> "from-blue-600/20 to-blue-800/10 border-blue-500/30"
+      "yellow" -> "from-amber-600/20 to-amber-800/10 border-amber-500/30"
+      _ -> "from-slate-600/20 to-slate-800/10 border-slate-500/30"
+    end
+
+    stroke_color = case assigns.color do
+      "green" -> "#10b981"
+      "red" -> "#ef4444"
+      "blue" -> "#3b82f6"
+      "yellow" -> "#f59e0b"
+      _ -> "#64748b"
+    end
+
+    assigns = assigns
+      |> assign(:bg, bg)
+      |> assign(:stroke_color, stroke_color)
+      |> assign(:sparkline_path, build_sparkline_path(assigns.sparkline))
+
+    ~H"""
+    <div class={"p-4 rounded-xl bg-gradient-to-br border #{@bg}"}>
+      <div class="flex items-start justify-between">
+        <div class="text-2xl"><%= @icon %></div>
+        <!-- Mini Sparkline -->
+        <svg class="w-16 h-6" viewBox="0 0 64 24" preserveAspectRatio="none">
+          <path
+            d={@sparkline_path}
+            fill="none"
+            stroke={@stroke_color}
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="opacity-60"
+          />
+        </svg>
+      </div>
+      <div class="text-2xl font-bold text-white mt-1"><%= format_number(@value) %></div>
+      <div class="text-sm text-slate-400"><%= @label %></div>
+    </div>
+    """
+  end
+
+  # Activity Heatmap (GitHub style)
+  attr :data, :list, required: true
+
+  defp activity_heatmap(assigns) do
+    # Group by week
+    weeks = assigns.data
+      |> Enum.group_by(& &1.week)
+      |> Enum.sort_by(fn {week, _} -> week end)
+
+    day_labels = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"]
+
+    assigns = assigns
+      |> assign(:weeks, weeks)
+      |> assign(:day_labels, day_labels)
+
+    ~H"""
+    <div class="flex gap-1">
+      <!-- Day labels -->
+      <div class="flex flex-col gap-1 mr-2">
+        <%= for {label, idx} <- Enum.with_index(@day_labels) do %>
+          <div class={"w-8 h-4 text-xs text-slate-500 text-right pr-1 #{if rem(idx, 2) == 0, do: "opacity-100", else: "opacity-0"}"}>
+            <%= label %>
+          </div>
+        <% end %>
+      </div>
+
+      <!-- Heatmap grid -->
+      <div class="flex gap-1">
+        <%= for {_week, days} <- @weeks do %>
+          <div class="flex flex-col gap-1">
+            <%= for day <- Enum.sort_by(days, & &1.day) do %>
+              <div
+                class={"w-4 h-4 rounded-sm transition-colors cursor-pointer " <> heatmap_color(day.intensity)}
+                title={"#{day.date}: #{day.count} workflows"}
+              ></div>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <!-- Legend -->
+    <div class="flex items-center gap-2 mt-4 text-xs text-slate-500">
+      <span>Menos</span>
+      <div class="w-3 h-3 rounded-sm bg-slate-800"></div>
+      <div class="w-3 h-3 rounded-sm bg-emerald-900"></div>
+      <div class="w-3 h-3 rounded-sm bg-emerald-700"></div>
+      <div class="w-3 h-3 rounded-sm bg-emerald-500"></div>
+      <div class="w-3 h-3 rounded-sm bg-emerald-400"></div>
+      <span>Más</span>
+    </div>
+    """
+  end
+
+  defp heatmap_color(0), do: "bg-slate-800"
+  defp heatmap_color(1), do: "bg-emerald-900"
+  defp heatmap_color(2), do: "bg-emerald-700"
+  defp heatmap_color(3), do: "bg-emerald-500"
+  defp heatmap_color(4), do: "bg-emerald-400"
+  defp heatmap_color(_), do: "bg-emerald-400"
+
+  defp build_sparkline_path([]), do: "M0,12 L64,12"
+  defp build_sparkline_path(data) do
+    max_val = Enum.max(data) |> max(1)
+    points = data
+      |> Enum.with_index()
+      |> Enum.map(fn {val, idx} ->
+        x = idx * (64 / max(length(data) - 1, 1))
+        y = 22 - (val / max_val * 20)
+        {x, y}
+      end)
+
+    [{first_x, first_y} | rest] = points
+    path_start = "M#{Float.round(first_x, 1)},#{Float.round(first_y, 1)}"
+
+    rest
+    |> Enum.reduce(path_start, fn {x, y}, acc ->
+      acc <> " L#{Float.round(x, 1)},#{Float.round(y, 1)}"
+    end)
   end
 
   attr :rate, :float, required: true
@@ -624,6 +775,8 @@ defmodule BeamflowWeb.AnalyticsLive do
     |> assign(performance: metrics.performance)
     |> assign(hourly_trend: metrics.hourly_trend)
     |> assign(daily_trend: metrics.daily_trend)
+    |> assign(weekly_heatmap: metrics.weekly_heatmap)
+    |> assign(sparklines: metrics.sparklines)
     |> assign(by_module: metrics.by_module)
     |> assign(step_performance: metrics.step_performance)
     |> assign(recent_failures: metrics.recent_failures)

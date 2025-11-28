@@ -423,6 +423,84 @@ defmodule Beamflow.Analytics.WorkflowAnalyticsTest do
       assert is_list(export.recent_failures)
       # Export tiene límite de 20 vs 5 de dashboard
     end
+
+    test "incluye sample_info" do
+      export = WorkflowAnalytics.export_metrics()
+
+      assert Map.has_key?(export, :_sample_info)
+      assert is_map(export._sample_info)
+      assert Map.has_key?(export._sample_info, :is_sampled)
+    end
+  end
+
+  # ============================================================================
+  # Tests de Weekly Heatmap
+  # ============================================================================
+
+  describe "weekly_heatmap/0" do
+    test "retorna 49 celdas (7 semanas x 7 días)" do
+      heatmap = WorkflowAnalytics.weekly_heatmap()
+
+      assert is_list(heatmap)
+      assert length(heatmap) == 49
+    end
+
+    test "cada celda tiene estructura correcta" do
+      heatmap = WorkflowAnalytics.weekly_heatmap()
+      cell = hd(heatmap)
+
+      assert Map.has_key?(cell, :week)
+      assert Map.has_key?(cell, :day)
+      assert Map.has_key?(cell, :date)
+      assert Map.has_key?(cell, :count)
+      assert Map.has_key?(cell, :intensity)
+    end
+
+    test "intensity está entre 0 y 4" do
+      heatmap = WorkflowAnalytics.weekly_heatmap()
+
+      Enum.each(heatmap, fn cell ->
+        assert cell.intensity >= 0 && cell.intensity <= 4
+      end)
+    end
+  end
+
+  # ============================================================================
+  # Tests de Sparkline Data
+  # ============================================================================
+
+  describe "sparkline_data/2" do
+    test "retorna lista de N elementos" do
+      data = WorkflowAnalytics.sparkline_data(:total, 12)
+
+      assert is_list(data)
+      assert length(data) == 12
+    end
+
+    test "todos los valores son enteros no negativos" do
+      data = WorkflowAnalytics.sparkline_data(:completed, 6)
+
+      Enum.each(data, fn val ->
+        assert is_integer(val)
+        assert val >= 0
+      end)
+    end
+
+    test "soporta diferentes métricas" do
+      completed = WorkflowAnalytics.sparkline_data(:completed, 6)
+      failed = WorkflowAnalytics.sparkline_data(:failed, 6)
+      total = WorkflowAnalytics.sparkline_data(:total, 6)
+
+      assert is_list(completed)
+      assert is_list(failed)
+      assert is_list(total)
+    end
+
+    test "métrica desconocida retorna ceros" do
+      data = WorkflowAnalytics.sparkline_data(:unknown_metric, 4)
+
+      assert data == [0, 0, 0, 0]
+    end
   end
 
   # ============================================================================
