@@ -1162,14 +1162,15 @@ defmodule BeamflowWeb.WorkflowGraphLive do
 
     timings = events
     |> Enum.reduce(%{}, fn event, acc ->
-      step_index = event.metadata[:step_index]
+      event_data = Map.get(event, :data, %{}) || %{}
+      step_index = event_data[:step_index]
 
       case {event.event_type, step_index} do
         {:step_started, idx} when is_integer(idx) ->
           Map.update(acc, idx, %{started_at: event.timestamp}, &Map.put(&1, :started_at, event.timestamp))
 
         {:step_completed, idx} when is_integer(idx) ->
-          duration = event.metadata[:duration_ms] || 0
+          duration = event_data[:duration_ms] || 0
           Map.update(acc, idx, %{completed_at: event.timestamp, duration_ms: duration}, fn existing ->
             existing
             |> Map.put(:completed_at, event.timestamp)
@@ -1177,8 +1178,8 @@ defmodule BeamflowWeb.WorkflowGraphLive do
           end)
 
         {:step_failed, idx} when is_integer(idx) ->
-          duration = event.metadata[:duration_ms] || 0
-          error = event.metadata[:reason] || "Unknown error"
+          duration = event_data[:duration_ms] || 0
+          error = event_data[:reason] || "Unknown error"
           Map.update(acc, idx, %{failed_at: event.timestamp, duration_ms: duration, error: error}, fn existing ->
             existing
             |> Map.put(:failed_at, event.timestamp)
@@ -1198,7 +1199,8 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     # Filtrar eventos del step específico
     step_events = all_events
     |> Enum.filter(fn event ->
-      event.metadata[:step_index] == step_index and
+      event_data = Map.get(event, :data, %{}) || %{}
+      event_data[:step_index] == step_index and
       event.event_type in [:step_started, :step_completed, :step_failed]
     end)
     |> Enum.sort_by(& &1.timestamp)
@@ -1213,12 +1215,13 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     # Buscar el siguiente completed o failed
     {end_event, remaining} = find_end_event(rest)
 
+    end_event_data = if end_event, do: Map.get(end_event, :data, %{}) || %{}, else: %{}
     attempt = %{
       started_at: start.timestamp,
       ended_at: end_event && end_event.timestamp,
-      duration_ms: end_event && end_event.metadata[:duration_ms],
+      duration_ms: end_event && end_event_data[:duration_ms],
       success: end_event && end_event.event_type == :step_completed,
-      error: end_event && end_event.metadata[:reason]
+      error: end_event && end_event_data[:reason]
     }
 
     build_attempts_from_events(remaining, [attempt | attempts])
@@ -1586,12 +1589,13 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     |> Enum.sort_by(& &1.timestamp)
     |> Enum.with_index()
     |> Enum.map(fn {event, index} ->
+      event_data = Map.get(event, :data, %{}) || %{}
       %{
         index: index,
         event: event,
         timestamp: event.timestamp,
         event_type: event.event_type,
-        step_index: event.metadata[:step_index],
+        step_index: event_data[:step_index],
         description: describe_event(event),
         severity: event_severity(event.event_type),
         is_marker: is_marker_event?(event.event_type)
@@ -1602,9 +1606,10 @@ defmodule BeamflowWeb.WorkflowGraphLive do
   end
 
   defp describe_event(event) do
-    step_info = if event.metadata[:step_index] do
-      step_module = event.metadata[:step_module]
-      step_name = if step_module, do: format_step_label(step_module), else: "Step #{event.metadata[:step_index]}"
+    event_data = Map.get(event, :data, %{}) || %{}
+    step_info = if event_data[:step_index] do
+      step_module = event_data[:step_module]
+      step_name = if step_module, do: format_step_label(step_module), else: "Step #{event_data[:step_index]}"
       " - #{step_name}"
     else
       ""
@@ -1669,7 +1674,8 @@ defmodule BeamflowWeb.WorkflowGraphLive do
 
     Enum.reduce(timeline_events, initial_state, fn timeline_entry, state ->
       event = timeline_entry.event
-      step_index = event.metadata[:step_index]
+      event_data = Map.get(event, :data, %{}) || %{}
+      step_index = event_data[:step_index]
 
       case event.event_type do
         :workflow_started ->

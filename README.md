@@ -256,6 +256,7 @@ Response headers include:
 
 | Document | Description |
 |----------|-------------|
+| [GUIA_TECNICA_EDUCATIVA.md](docs/GUIA_TECNICA_EDUCATIVA.md) | 📖 Complete technical guide for students |
 | [DEMO_GUIDE.md](docs/DEMO_GUIDE.md) | Quick demo walkthrough for evaluators |
 | [QA_CHECKLIST.md](docs/QA_CHECKLIST.md) | Manual testing checklist |
 | [DEVELOPMENT.md](docs/DEVELOPMENT.md) | Development setup and tooling |
