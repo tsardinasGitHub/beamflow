@@ -1,0 +1,150 @@
+# ==============================================================================
+# Beamflow Docker Compose
+# Configuración para desarrollo local y producción
+# ==============================================================================
+
+version: "3.8"
+
+services:
+  # ============================================================================
+  # Servicio Principal - Beamflow
+  # ============================================================================
+  beamflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        MIX_ENV: prod
+        NODE_NAME: beamflow
+    container_name: beamflow-app
+    hostname: beamflow
+    restart: unless-stopped
+    ports:
+      - "${PORT:-4000}:4000"
+    environment:
+      - MIX_ENV=prod
+      - PHX_SERVER=true
+      - PHX_HOST=${PHX_HOST:-localhost}
+      - PORT=4000
+      - SECRET_KEY_BASE=${SECRET_KEY_BASE}
+      - NODE_NAME=beamflow
+      - MNESIA_DIR=/app/.mnesia
+      # Chaos Monkey desactivado por defecto en prod
+      - CHAOS_ENABLED=false
+    volumes:
+      # Persistencia de Mnesia (DLQ, workflows, events, idempotencia)
+      - beamflow_mnesia:/app/.mnesia
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - beamflow-network
+
+  # ============================================================================
+  # Servicio de Desarrollo
+  # ============================================================================
+  beamflow-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: beamflow-dev
+    hostname: beamflow
+    ports:
+      - "${PORT:-4000}:4000"
+    environment:
+      - MIX_ENV=dev
+      - PHX_HOST=localhost
+      - NODE_NAME=beamflow
+      # Chaos Monkey activado en dev para testing
+      - CHAOS_ENABLED=${CHAOS_ENABLED:-true}
+      - CHAOS_FAILURE_RATE=${CHAOS_FAILURE_RATE:-0.1}
+    volumes:
+      # Montar código fuente para hot-reload
+      - .:/app
+      # Excluir _build y deps para evitar conflictos
+      - /app/_build
+      - /app/deps
+      - /app/node_modules
+      # Persistencia de Mnesia en desarrollo
+      - beamflow_mnesia_dev:/app/.mnesia
+    networks:
+      - beamflow-network
+    profiles:
+      - dev
+
+  # ============================================================================
+  # Servicio de Tests
+  # ============================================================================
+  beamflow-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: beamflow-test
+    environment:
+      - MIX_ENV=test
+      - CHAOS_ENABLED=false
+    volumes:
+      - .:/app
+      - /app/_build
+      - /app/deps
+    command: ["sh", "-c", "mix deps.get && mix test"]
+    networks:
+      - beamflow-network
+    profiles:
+      - test
+
+  # ============================================================================
+  # Servicio de Análisis de Calidad
+  # ============================================================================
+  beamflow-quality:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: beamflow-quality
+    environment:
+      - MIX_ENV=dev
+    volumes:
+      - .:/app
+      - /app/_build
+      - /app/deps
+      # Cache de PLT para Dialyzer
+      - beamflow_plt_cache:/app/priv/plts
+    command: ["sh", "-c", "mix deps.get && mix quality"]
+    networks:
+      - beamflow-network
+    profiles:
+      - quality
+
+# ==============================================================================
+# Volúmenes
+# ==============================================================================
+volumes:
+  # Datos persistentes de Mnesia (producción)
+  beamflow_mnesia:
+    name: beamflow_mnesia_data
+    driver: local
+  
+  # Datos de Mnesia (desarrollo)
+  beamflow_mnesia_dev:
+    name: beamflow_mnesia_dev
+    driver: local
+  
+  # Cache de PLT para Dialyzer
+  beamflow_plt_cache:
+    name: beamflow_plt_cache
+    driver: local
+
+# ==============================================================================
+# Redes
+# ==============================================================================
+networks:
+  beamflow-network:
+    name: beamflow-network
+    driver: bridge

@@ -1,0 +1,79 @@
+# ==============================================================================
+# Beamflow Docker Ignore
+# Excluir archivos innecesarios del contexto de build
+# ==============================================================================
+
+# Build artifacts
+/_build/
+/deps/
+/cover/
+/doc/
+
+# Editor and IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+/.elixir_ls/
+/.lexical/
+
+# Git
+.git/
+.gitignore
+.github/
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Tests (no necesarios en producción)
+/test/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Mnesia data (cada contenedor crea la suya)
+/.mnesia/
+/Mnesia.*/
+/mnesia/
+
+# Node modules (se instalan en build)
+/assets/node_modules/
+
+# Dialyzer PLTs
+/priv/plts/
+
+# Coverage
+/coverage/
+
+# Temporary files
+/tmp/
+*.log
+
+# Other development files
+.credo/
+.sobelow
+.formatter.exs
+.credo.exs
+sobelow-config.exs
+erl_crash.dump
+*.ez
+
+# Docker files (evitar recursión)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Backup files
+*.bak
+*.orig
