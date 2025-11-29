@@ -50,14 +50,64 @@ defmodule BeamflowWeb.WorkflowExplorerLive do
   end
 
   @impl true
-  def handle_info({:workflow_updated, %{id: id}}, socket) when is_binary(id) do
+  def handle_info({:workflow_updated, %{workflow_id: workflow_id}}, socket) when is_binary(workflow_id) do
     # Acumular IDs para batch update
-    pending = MapSet.put(socket.assigns.pending_updates, id)
+    pending = MapSet.put(socket.assigns.pending_updates, workflow_id)
     {:noreply, assign(socket, pending_updates: pending)}
   end
 
   @impl true
   def handle_info({:workflow_updated, _}, socket) do
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info(:clear_flash, socket) do
+    {:noreply, clear_flash(socket)}
+  end
+
+  @impl true
+  def handle_info({:refresh_for_new_workflow, workflow_id}, socket) do
+    # Buscar el workflow recién creado y añadirlo al stream
+    socket =
+      case WorkflowStore.get_workflow(workflow_id) do
+        {:ok, workflow} ->
+          if matches_filters?(workflow, socket.assigns.filters) do
+            socket
+            |> stream_insert(:workflows, workflow, at: 0)
+            |> update_stats()
+          else
+            socket
+          end
+
+        _ ->
+          # Si no está listo todavía, reintentar una vez más
+          Process.send_after(self(), {:refresh_for_new_workflow_retry, workflow_id}, 200)
+          socket
+      end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:refresh_for_new_workflow_retry, workflow_id}, socket) do
+    # Último intento de buscar el workflow
+    socket =
+      case WorkflowStore.get_workflow(workflow_id) do
+        {:ok, workflow} ->
+          if matches_filters?(workflow, socket.assigns.filters) do
+            socket
+            |> stream_insert(:workflows, workflow, at: 0)
+            |> update_stats()
+          else
+            socket
+          end
+
+        _ ->
+          # Si aún no está, el PubSub batch update lo capturará
+          socket
+      end
+
     {:noreply, socket}
   end
 
@@ -162,9 +212,14 @@ defmodule BeamflowWeb.WorkflowExplorerLive do
 
     case WorkflowSupervisor.start_workflow(InsuranceWorkflow, workflow_id, params) do
       {:ok, _pid} ->
+        # Programar actualización después de que el workflow se persista
+        Process.send_after(self(), {:refresh_for_new_workflow, workflow_id}, 100)
+        # Auto-hide flash después de 3 segundos
+        Process.send_after(self(), :clear_flash, 3_000)
         {:noreply, put_flash(socket, :info, "Workflow #{workflow_id} creado")}
 
       {:error, reason} ->
+        Process.send_after(self(), :clear_flash, 5_000)
         {:noreply, put_flash(socket, :error, "Error: #{inspect(reason)}")}
     end
   end
