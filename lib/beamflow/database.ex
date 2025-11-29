@@ -251,13 +251,14 @@ defdatabase Beamflow.Database do
 
   deftable DeadLetterEntry,
     [:id, :type, :status, :workflow_id, :workflow_module, :failed_step,
-     :error, :context, :original_params, :metadata, :created_at, :updated_at,
+     :error, :error_class, :context, :original_params, :metadata, :created_at, :updated_at,
      :retry_count, :next_retry_at, :resolution],
     type: :set,
     index: [:status, :type, :workflow_id] do
 
     @type entry_type :: :workflow_failed | :compensation_failed | :critical_failure
     @type entry_status :: :pending | :retrying | :resolved | :abandoned
+    @type error_class :: :transient | :permanent | :unknown
 
     @type t :: %__MODULE__{
       id: String.t(),
@@ -267,6 +268,7 @@ defdatabase Beamflow.Database do
       workflow_module: module(),
       failed_step: module() | nil,
       error: term(),
+      error_class: error_class(),
       context: map(),
       original_params: map(),
       metadata: map(),
@@ -279,10 +281,24 @@ defdatabase Beamflow.Database do
 
     @doc """
     Crea una nueva entrada DLQ.
+
+    Automáticamente clasifica el error como `:transient`, `:permanent` o `:unknown`
+    para determinar si el workflow puede ser reintentado automáticamente.
+
+    ## Error Classes
+
+    - `:transient` - Errores temporales (timeout, service_unavailable) - reintentable
+    - `:permanent` - Errores de validación (missing_dni, invalid_format) - requiere intervención
+    - `:unknown` - No clasificado - se trata como transient por defecto
     """
     @spec new(map()) :: t()
     def new(attrs) do
       now = DateTime.utc_now()
+      error = attrs[:error]
+      error_class = classify_error(error)
+
+      # Solo calcular next_retry si el error es potencialmente reintentable
+      next_retry = if error_class == :permanent, do: nil, else: calculate_next_retry(0)
 
       %__MODULE__{
         id: generate_id(),
@@ -291,17 +307,56 @@ defdatabase Beamflow.Database do
         workflow_id: attrs[:workflow_id],
         workflow_module: attrs[:workflow_module],
         failed_step: attrs[:failed_step],
-        error: attrs[:error],
+        error: error,
+        error_class: error_class,
         context: sanitize(attrs[:context] || %{}),
         original_params: sanitize(attrs[:original_params] || %{}),
         metadata: attrs[:metadata] || %{},
         created_at: now,
         updated_at: now,
         retry_count: 0,
-        next_retry_at: calculate_next_retry(0),
+        next_retry_at: next_retry,
         resolution: nil
       }
     end
+
+    # Clasifica el error usando el módulo Retry si está disponible
+    defp classify_error(error) do
+      # Intentar usar Retry.classify_error/1 si está disponible
+      # para evitar duplicar la lógica de clasificación
+      try do
+        Beamflow.Engine.Retry.classify_error(error)
+      rescue
+        # Si Retry no está cargado aún (durante compilación), usar clasificación básica
+        _ -> basic_classify_error(error)
+      end
+    end
+
+    # Clasificación básica de errores (fallback)
+    defp basic_classify_error(error) when is_atom(error) do
+      permanent = [
+        :missing_dni, :missing_email, :missing_required_field,
+        :invalid_dni_format, :invalid_email_format, :invalid_input,
+        :validation_failed, :unauthorized, :forbidden
+      ]
+
+      transient = [
+        :timeout, :service_unavailable, :connection_refused,
+        :rate_limited, :temporary_failure
+      ]
+
+      cond do
+        error in permanent -> :permanent
+        error in transient -> :transient
+        true -> :unknown
+      end
+    end
+
+    defp basic_classify_error({error, _}) when is_atom(error) do
+      basic_classify_error(error)
+    end
+
+    defp basic_classify_error(_), do: :unknown
 
     defp generate_id do
       "dlq_" <> (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))

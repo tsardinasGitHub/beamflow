@@ -223,26 +223,46 @@ defmodule BeamflowWeb.WorkflowExplorerLive do
 
   @impl true
   def handle_event("retry_workflow", %{"id" => id}, socket) do
+    alias Beamflow.Engine.Retry
+
     case WorkflowStore.get_workflow(id) do
       {:ok, workflow} ->
-        # Reiniciar el workflow con los mismos parámetros
-        case WorkflowSupervisor.start_workflow(
-          workflow.workflow_module,
-          id <> "-retry-#{:rand.uniform(999)}",
-          workflow.workflow_state
-        ) do
-          {:ok, _pid} ->
-            Process.send_after(self(), {:refresh_for_new_workflow, id}, 100)
-            {:noreply, put_flash_auto_hide(socket, :info, "Reintento de #{id} iniciado")}
+        # Verificar si el error es permanente (no reintentable)
+        error_class = Retry.classify_error(workflow.error)
 
-          {:error, reason} ->
-            {:noreply, put_flash_auto_hide(socket, :error, "Error al reintentar: #{inspect(reason)}", 5_000)}
+        if error_class == :permanent do
+          {:noreply,
+           put_flash_auto_hide(
+             socket,
+             :error,
+             "❌ Error permanente: #{format_error(workflow.error)}. Requiere corrección manual de los datos.",
+             7_000
+           )}
+        else
+          # Reiniciar el workflow con los mismos parámetros
+          case WorkflowSupervisor.start_workflow(
+                 workflow.workflow_module,
+                 id <> "-retry-#{:rand.uniform(999)}",
+                 workflow.workflow_state
+               ) do
+            {:ok, _pid} ->
+              Process.send_after(self(), {:refresh_for_new_workflow, id}, 100)
+              {:noreply, put_flash_auto_hide(socket, :info, "🔄 Reintento de #{id} iniciado")}
+
+            {:error, reason} ->
+              {:noreply,
+               put_flash_auto_hide(socket, :error, "Error al reintentar: #{inspect(reason)}", 5_000)}
+          end
         end
 
       {:error, _reason} ->
         {:noreply, put_flash_auto_hide(socket, :error, "Workflow #{id} no encontrado", 5_000)}
     end
   end
+
+  defp format_error(error) when is_atom(error), do: Atom.to_string(error)
+  defp format_error({error, _}) when is_atom(error), do: Atom.to_string(error)
+  defp format_error(error), do: inspect(error)
 
   @impl true
   def render(assigns) do
@@ -443,15 +463,7 @@ defmodule BeamflowWeb.WorkflowExplorerLive do
                     >
                       📊
                     </.link>
-                    <button
-                      :if={wf.status == :failed}
-                      phx-click="retry_workflow"
-                      phx-value-id={wf.id}
-                      class="p-2 text-slate-400 hover:text-green-400 hover:bg-slate-700 rounded transition"
-                      title="Reintentar"
-                    >
-                      🔄
-                    </button>
+                    <.retry_button :if={wf.status == :failed} workflow={wf} />
                   </div>
                 </td>
               </tr>
@@ -485,6 +497,43 @@ defmodule BeamflowWeb.WorkflowExplorerLive do
     <span :if={@field == @current} class="text-blue-400">
       <%= if @order == :asc, do: "↑", else: "↓" %>
     </span>
+    """
+  end
+
+  attr :workflow, :map, required: true
+
+  defp retry_button(assigns) do
+    alias Beamflow.Engine.Retry
+
+    error_class = Retry.classify_error(assigns.workflow.error)
+    is_permanent = error_class == :permanent
+
+    assigns =
+      assigns
+      |> assign(:is_permanent, is_permanent)
+      |> assign(:error_class, error_class)
+
+    ~H"""
+    <button
+      phx-click="retry_workflow"
+      phx-value-id={@workflow.id}
+      class={[
+        "p-2 rounded transition",
+        if(@is_permanent,
+          do: "text-orange-400 hover:text-orange-300 hover:bg-orange-900/30 cursor-help",
+          else: "text-slate-400 hover:text-green-400 hover:bg-slate-700"
+        )
+      ]}
+      title={
+        if @is_permanent do
+          "⚠️ Error permanente: #{format_error(@workflow.error)} - Requiere corrección manual"
+        else
+          "🔄 Reintentar workflow"
+        end
+      }
+    >
+      <%= if @is_permanent, do: "⚠️", else: "🔄" %>
+    </button>
     """
   end
 

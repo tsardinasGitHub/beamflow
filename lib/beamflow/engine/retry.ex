@@ -453,8 +453,33 @@ defmodule Beamflow.Engine.Retry do
   def retryable?(_error, :all), do: true
 
   def retryable?(error, :transient) do
-    # Errores considerados transitorios por defecto
-    transient_errors = [
+    error_atom = extract_error_atom(error)
+
+    # Primero verificar si es un error permanente (nunca retryable)
+    if permanent_error?(error_atom) do
+      false
+    else
+      error_atom in transient_errors()
+    end
+  end
+
+  def retryable?(error, retryable_list) when is_list(retryable_list) do
+    error_atom = extract_error_atom(error)
+
+    # Errores permanentes nunca son retryable, incluso si están en la lista
+    if permanent_error?(error_atom) do
+      false
+    else
+      error_atom in retryable_list
+    end
+  end
+
+  @doc """
+  Lista de errores considerados transitorios (pueden recuperarse con retry).
+  """
+  @spec transient_errors() :: [atom()]
+  def transient_errors do
+    [
       :timeout,
       :service_unavailable,
       :bad_gateway,
@@ -469,16 +494,130 @@ defmodule Beamflow.Engine.Retry do
       :temporary_failure,
       :rate_limited,
       :too_many_requests,
-      :overloaded
+      :overloaded,
+      # Errores de base de datos transitorios
+      :deadlock,
+      :lock_timeout,
+      :too_many_connections
     ]
-
-    error_atom = extract_error_atom(error)
-    error_atom in transient_errors
   end
 
-  def retryable?(error, retryable_list) when is_list(retryable_list) do
+  @doc """
+  Lista de errores considerados permanentes (requieren intervención manual).
+
+  Estos errores indican problemas con los datos de entrada o configuración
+  que no se resolverán con reintentos automáticos.
+
+  ## Categorías
+
+  - **Validación**: Datos faltantes o formato inválido
+  - **Autenticación**: Credenciales inválidas o expiradas
+  - **Autorización**: Permisos insuficientes
+  - **Negocio**: Reglas de negocio no cumplidas
+
+  ## Ejemplo
+
+      iex> Retry.permanent_error?(:missing_dni)
+      true
+
+      iex> Retry.permanent_error?(:timeout)
+      false
+  """
+  @spec permanent_errors() :: [atom()]
+  def permanent_errors do
+    [
+      # Errores de validación - datos faltantes
+      :missing_dni,
+      :missing_email,
+      :missing_required_field,
+      :missing_applicant_name,
+      :missing_vehicle_plate,
+      :missing_phone,
+      :missing_address,
+
+      # Errores de validación - formato inválido
+      :invalid_dni_format,
+      :invalid_email_format,
+      :invalid_phone_format,
+      :invalid_date_format,
+      :invalid_input,
+      :validation_failed,
+      :schema_validation_failed,
+
+      # Errores de autenticación/autorización
+      :unauthorized,
+      :forbidden,
+      :invalid_credentials,
+      :token_expired,
+      :invalid_token,
+      :permission_denied,
+
+      # Errores de negocio
+      :applicant_blacklisted,
+      :policy_already_exists,
+      :duplicate_request,
+      :credit_score_too_low,
+      :vehicle_not_insurable,
+      :request_rejected,
+      :max_age_exceeded,
+
+      # Errores de configuración
+      :invalid_configuration,
+      :missing_configuration,
+      :workflow_not_found,
+      :step_not_found
+    ]
+  end
+
+  @doc """
+  Verifica si un error es permanente (no retryable bajo ninguna circunstancia).
+
+  ## Ejemplo
+
+      iex> Retry.permanent_error?(:missing_dni)
+      true
+
+      iex> Retry.permanent_error?(:timeout)
+      false
+
+      iex> Retry.permanent_error?({:missing_dni, "DNI es requerido"})
+      true
+  """
+  @spec permanent_error?(term()) :: boolean()
+  def permanent_error?(error) do
     error_atom = extract_error_atom(error)
-    error_atom in retryable_list
+    error_atom in permanent_errors()
+  end
+
+  @doc """
+  Clasifica un error como `:transient` o `:permanent`.
+
+  ## Retorno
+
+  - `:transient` - El error puede resolverse con reintentos
+  - `:permanent` - El error requiere intervención manual
+  - `:unknown` - No se puede clasificar, se trata como transitorio por defecto
+
+  ## Ejemplo
+
+      iex> Retry.classify_error(:timeout)
+      :transient
+
+      iex> Retry.classify_error(:missing_dni)
+      :permanent
+
+      iex> Retry.classify_error(:some_unknown_error)
+      :unknown
+  """
+  @spec classify_error(term()) :: :transient | :permanent | :unknown
+  def classify_error(error) do
+    error_atom = extract_error_atom(error)
+
+    cond do
+      error_atom in permanent_errors() -> :permanent
+      error_atom in transient_errors() -> :transient
+      true -> :unknown
+    end
   end
 
   defp extract_error_atom(error) when is_atom(error), do: error
