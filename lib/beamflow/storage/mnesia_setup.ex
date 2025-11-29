@@ -51,6 +51,7 @@ defmodule Beamflow.Storage.MnesiaSetup do
   @workflows_table :beamflow_workflows
   @events_table :beamflow_events
   @idempotency_table :beamflow_idempotency
+  @dlq_table :beamflow_dlq
 
   @doc """
   Instala el schema y tablas de Mnesia.
@@ -75,7 +76,10 @@ defmodule Beamflow.Storage.MnesiaSetup do
     # 1. Detener Mnesia si está corriendo
     :mnesia.stop()
 
-    # 2. Crear schema
+    # 2. Asegurar que el directorio de Mnesia existe
+    ensure_mnesia_dir()
+
+    # 3. Crear schema
     case :mnesia.create_schema(nodes) do
       :ok ->
         Logger.info("Mnesia schema created successfully.")
@@ -94,11 +98,13 @@ defmodule Beamflow.Storage.MnesiaSetup do
     create_workflows_table(nodes)
     create_events_table(nodes)
     create_idempotency_table(nodes)
+    create_dlq_table(nodes)
 
     # 5. Esperar a que las tablas estén listas
-    :mnesia.wait_for_tables([@workflows_table, @events_table, @idempotency_table], 5000)
+    all_tables = [@workflows_table, @events_table, @idempotency_table, @dlq_table]
+    :mnesia.wait_for_tables(all_tables, 5000)
 
-    Logger.info("Mnesia setup completed. Tables: #{inspect([@workflows_table, @events_table, @idempotency_table])}")
+    Logger.info("Mnesia setup completed. Tables: #{inspect(all_tables)}")
 
     # 6. Detener Mnesia para que Application lo inicie
     :mnesia.stop()
@@ -120,6 +126,14 @@ defmodule Beamflow.Storage.MnesiaSetup do
   @spec ensure_tables() :: :ok | {:error, term()}
   def ensure_tables do
     nodes = [node()]
+
+    # Asegurar que el directorio existe (importante para disc_copies)
+    ensure_mnesia_dir()
+
+    # Si vamos a usar disc_copies, necesitamos schema en disco
+    # Esto es idempotente - no falla si ya existe
+    ensure_disc_schema_if_needed(nodes)
+
     existing_tables = :mnesia.system_info(:tables)
 
     # Crear tabla de workflows si no existe
@@ -137,10 +151,17 @@ defmodule Beamflow.Storage.MnesiaSetup do
       create_idempotency_table(nodes)
     end
 
+    # Crear tabla de DLQ si no existe
+    unless @dlq_table in existing_tables do
+      create_dlq_table(nodes)
+    end
+
     # Esperar a que estén listas
-    case :mnesia.wait_for_tables([@workflows_table, @events_table, @idempotency_table], 10_000) do
+    all_tables = [@workflows_table, @events_table, @idempotency_table, @dlq_table]
+
+    case :mnesia.wait_for_tables(all_tables, 10_000) do
       :ok ->
-        Logger.info("Mnesia tables ready: #{inspect([@workflows_table, @events_table, @idempotency_table])}")
+        Logger.info("Mnesia tables ready: #{inspect(all_tables)}")
         :ok
 
       {:timeout, tables} ->
@@ -166,7 +187,7 @@ defmodule Beamflow.Storage.MnesiaSetup do
   @spec drop_tables() :: :ok | {:error, term()}
   def drop_tables do
     results =
-      [@workflows_table, @events_table, @idempotency_table]
+      [@workflows_table, @events_table, @idempotency_table, @dlq_table]
       |> Enum.map(fn table ->
         case :mnesia.delete_table(table) do
           {:atomic, :ok} ->
@@ -305,6 +326,33 @@ defmodule Beamflow.Storage.MnesiaSetup do
     end
   end
 
+  defp create_dlq_table(nodes) do
+    # Tabla para Dead Letter Queue
+    # Almacena workflows que fallaron para reprocesamiento
+    attributes = [
+      :id,            # ID único del entry DLQ
+      :data           # Map con todos los datos del entry
+    ]
+
+    storage_type = storage_type_for_env()
+
+    table_opts = [
+      attributes: attributes,
+      type: :set
+    ] ++ storage_opts(storage_type, nodes)
+
+    case :mnesia.create_table(@dlq_table, table_opts) do
+      {:atomic, :ok} ->
+        Logger.info("Table '#{@dlq_table}' created with #{storage_type}")
+
+      {:aborted, {:already_exists, _}} ->
+        Logger.debug("Table '#{@dlq_table}' already exists")
+
+      {:aborted, reason} ->
+        Logger.error("Failed to create table '#{@dlq_table}': #{inspect(reason)}")
+    end
+  end
+
   defp create_index(table, attribute) do
     case :mnesia.add_table_index(table, attribute) do
       {:atomic, :ok} ->
@@ -318,8 +366,22 @@ defmodule Beamflow.Storage.MnesiaSetup do
     end
   end
 
-  # Determina el tipo de almacenamiento según el entorno
-  defp storage_type_for_env do
+  @doc """
+  Determina el tipo de almacenamiento según el entorno.
+
+  - `:disc_copies` - Nodo con nombre (persistencia en disco)
+  - `:ram_copies` - Nodo anónimo (solo memoria, sin persistencia)
+
+  ## Ejemplo
+
+      iex> MnesiaSetup.storage_type_for_env()
+      :ram_copies  # En nodo anónimo (nonode@nohost)
+
+      iex> MnesiaSetup.storage_type_for_env()
+      :disc_copies  # En nodo nombrado (beamflow@hostname)
+  """
+  @spec storage_type_for_env() :: :ram_copies | :disc_copies
+  def storage_type_for_env do
     # Si el nodo no tiene nombre (nonode@nohost), usamos ram_copies
     # porque disc_copies requiere un nodo nombrado
     case node() do
@@ -330,4 +392,51 @@ defmodule Beamflow.Storage.MnesiaSetup do
 
   defp storage_opts(:ram_copies, nodes), do: [ram_copies: nodes]
   defp storage_opts(:disc_copies, nodes), do: [disc_copies: nodes]
+
+  # Asegura que el directorio de Mnesia existe
+  defp ensure_mnesia_dir do
+    # Obtener el directorio configurado o usar el default
+    dir = Application.get_env(:mnesia, :dir) || ~c".mnesia/#{node()}"
+    dir_string = to_string(dir)
+
+    case File.mkdir_p(dir_string) do
+      :ok ->
+        Logger.debug("Mnesia directory ensured: #{dir_string}")
+
+      {:error, reason} ->
+        Logger.warning("Could not create Mnesia directory #{dir_string}: #{inspect(reason)}")
+    end
+  end
+
+  # Crea el schema en disco si es necesario para disc_copies
+  # Debe llamarse ANTES de iniciar Mnesia o cuando Mnesia está detenido
+  defp ensure_disc_schema_if_needed(nodes) do
+    # Solo necesario para disc_copies
+    if storage_type_for_env() == :disc_copies do
+      # Verificar si ya existe schema en disco
+      dir = Application.get_env(:mnesia, :dir) || ~c".mnesia/#{node()}"
+      schema_file = Path.join(to_string(dir), "schema.DAT")
+
+      unless File.exists?(schema_file) do
+        Logger.info("Creating disc schema for Mnesia...")
+
+        # Detener Mnesia temporalmente para crear schema
+        :mnesia.stop()
+
+        case :mnesia.create_schema(nodes) do
+          :ok ->
+            Logger.info("Mnesia disc schema created successfully")
+
+          {:error, {_, {:already_exists, _}}} ->
+            Logger.debug("Mnesia schema already exists")
+
+          {:error, reason} ->
+            Logger.warning("Could not create disc schema: #{inspect(reason)}")
+        end
+
+        # Reiniciar Mnesia
+        :mnesia.start()
+      end
+    end
+  end
 end

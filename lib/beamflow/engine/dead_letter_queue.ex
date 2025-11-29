@@ -52,6 +52,7 @@ defmodule Beamflow.Engine.DeadLetterQueue do
   require Logger
 
   alias Beamflow.Engine.AlertSystem
+  alias Beamflow.Storage.MnesiaSetup
 
   @table :beamflow_dlq
   @ets_cache :beamflow_dlq_cache
@@ -351,6 +352,8 @@ defmodule Beamflow.Engine.DeadLetterQueue do
       failed_step: opts[:failed_step],
       error: opts[:error],
       context: sanitize_context(opts[:context] || %{}),
+      # Parámetros originales para retry
+      original_params: sanitize_context(opts[:original_params] || %{}),
       metadata: opts[:metadata] || %{},
       created_at: now,
       updated_at: now,
@@ -391,35 +394,30 @@ defmodule Beamflow.Engine.DeadLetterQueue do
   end
 
   defp ensure_mnesia_table do
-    case :mnesia.create_table(@table, [
+    # Usar la misma lógica de storage que MnesiaSetup
+    # disc_copies con nodo nombrado, ram_copies con nodo anónimo
+    storage_type = MnesiaSetup.storage_type_for_env()
+    nodes = [node()]
+
+    table_opts = [
       attributes: [:id, :data],
-      disc_copies: [node()],
       type: :set
-    ]) do
+    ] ++ storage_opts(storage_type, nodes)
+
+    case :mnesia.create_table(@table, table_opts) do
       {:atomic, :ok} ->
-        Logger.info("DLQ: Mnesia table created")
+        Logger.info("DLQ: Mnesia table created (#{storage_type})")
 
       {:aborted, {:already_exists, @table}} ->
         Logger.debug("DLQ: Mnesia table already exists")
 
       {:aborted, reason} ->
-        # Intentar con ram_copies si disc_copies falla
-        case :mnesia.create_table(@table, [
-          attributes: [:id, :data],
-          ram_copies: [node()],
-          type: :set
-        ]) do
-          {:atomic, :ok} ->
-            Logger.info("DLQ: Mnesia table created (ram_copies)")
-
-          {:aborted, {:already_exists, @table}} ->
-            :ok
-
-          {:aborted, reason2} ->
-            Logger.warning("DLQ: Could not create Mnesia table: #{inspect(reason)} / #{inspect(reason2)}")
-        end
+        Logger.warning("DLQ: Could not create Mnesia table: #{inspect(reason)}")
     end
   end
+
+  defp storage_opts(:ram_copies, nodes), do: [ram_copies: nodes]
+  defp storage_opts(:disc_copies, nodes), do: [disc_copies: nodes]
 
   defp persist_entry(entry) do
     case :mnesia.transaction(fn ->
@@ -542,10 +540,12 @@ defmodule Beamflow.Engine.DeadLetterQueue do
   end
 
   defp retry_workflow(entry) do
-    # Re-ejecutar el workflow desde el principio
+    # Re-ejecutar el workflow desde el principio con params originales
     workflow_module = entry.workflow_module
     workflow_id = "#{entry.workflow_id}_retry_#{entry.retry_count}"
-    params = entry.context
+
+    # Usar params originales si existen, sino intentar extraer del context
+    params = get_retry_params(entry)
 
     case Beamflow.Engine.WorkflowSupervisor.start_workflow(workflow_module, workflow_id, params) do
       {:ok, _pid} -> {:ok, :workflow_restarted}
@@ -553,6 +553,30 @@ defmodule Beamflow.Engine.DeadLetterQueue do
     end
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
+  end
+
+  # Obtener parámetros para retry, con fallback inteligente
+  defp get_retry_params(entry) do
+    cond do
+      # Primero: usar original_params si existen y no están vacíos
+      is_map(entry.original_params) and map_size(entry.original_params) > 0 ->
+        entry.original_params
+
+      # Fallback: convertir context (workflow_state) a string keys
+      is_map(entry.context) and map_size(entry.context) > 0 ->
+        convert_to_string_keys(entry.context)
+
+      true ->
+        %{}
+    end
+  end
+
+  # Convierte claves átomo a string para compatibilidad con initial_state
+  defp convert_to_string_keys(map) when is_map(map) do
+    Map.new(map, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), v}
+      {k, v} -> {k, v}
+    end)
   end
 
   defp do_resolve(entry, resolution_type, notes) do

@@ -202,6 +202,8 @@ defmodule Beamflow.Engine.WorkflowActor do
       workflow_module: workflow_module,
       workflow_id: workflow_id,
       workflow_state: workflow_state,
+      # Parámetros originales para retry en DLQ
+      original_params: params,
       # Compatibilidad con workflows lineales
       steps: steps,
       current_step_index: 0,
@@ -667,7 +669,8 @@ defmodule Beamflow.Engine.WorkflowActor do
         workflow_module,
         step_module,
         reason,
-        workflow_state
+        workflow_state,
+        state[:original_params] || %{}
       )
     end
 
@@ -693,7 +696,8 @@ defmodule Beamflow.Engine.WorkflowActor do
         workflow_module,
         module,
         {:compensation_failed, comp_error, original_error},
-        workflow_state
+        workflow_state,
+        %{}  # No hay params para compensation
       )
 
       # Verificar si el step es crítico
@@ -716,7 +720,7 @@ defmodule Beamflow.Engine.WorkflowActor do
     end)
   end
 
-  defp enqueue_to_dlq(type, workflow_id, workflow_module, failed_step, error, context) do
+  defp enqueue_to_dlq(type, workflow_id, workflow_module, failed_step, error, context, original_params) do
     DeadLetterQueue.enqueue(%{
       type: type,
       workflow_id: workflow_id,
@@ -724,6 +728,7 @@ defmodule Beamflow.Engine.WorkflowActor do
       failed_step: failed_step,
       error: error,
       context: context,
+      original_params: original_params,
       metadata: %{
         enqueued_at: DateTime.utc_now(),
         node: node()
