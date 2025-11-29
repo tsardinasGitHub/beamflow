@@ -159,7 +159,29 @@ mix test test/beamflow/
 - Logger configurado en nivel `:warning` para reducir ruido
 - Configuración en `config/test.exs`
 
-## 📊 Mnesia
+## 📊 Amnesia / Mnesia
+
+BeamFlow utiliza **Amnesia** como DSL wrapper sobre Mnesia para persistencia distribuida. Amnesia proporciona una API más limpia y structs tipados automáticos.
+
+### Arquitectura de Persistencia
+
+```
+lib/beamflow/
+├── database.ex                    # Definición de tablas con deftable
+└── database/
+    ├── query.ex                   # CRUD y queries específicas
+    ├── setup.ex                   # Inicialización (init/1, reset!/1, status/0)
+    └── migration.ex               # Backup/restore
+```
+
+### Tablas Definidas
+
+| Tabla | Tipo | Uso |
+|-------|------|-----|
+| `Beamflow.Database.Workflow` | `:set` | Workflows y su estado |
+| `Beamflow.Database.Event` | `:bag` | Eventos de cada workflow |
+| `Beamflow.Database.Idempotency` | `:set` | Control de idempotencia |
+| `Beamflow.Database.DeadLetterEntry` | `:set` | Cola de mensajes fallidos |
 
 ### Tipos de Almacenamiento
 
@@ -191,27 +213,26 @@ iex --sname beamflow -S mix
 
 ### Inicialización
 
+La base de datos se inicializa automáticamente al arrancar la aplicación. Para inicialización manual o reset:
+
 ```bash
 # Primera vez: crear schema y tablas con persistencia
-iex --sname beamflow -S mix run -e "Beamflow.Storage.MnesiaSetup.install()"
+iex --sname beamflow -S mix run -e "Beamflow.Database.Setup.init()"
 
-# Verificar tablas
+# Verificar estado de las tablas
 iex --sname beamflow -S mix
-iex> :mnesia.system_info(:tables)
-# [:beamflow_workflows, :beamflow_events, :schema]
+iex> Beamflow.Database.Setup.status()
+# %{workflow: :exists, event: :exists, idempotency: :exists, dead_letter_entry: :exists}
 ```
 
 ### Comandos Útiles
 
 ```elixir
-# Ver tablas disponibles
-:mnesia.system_info(:tables)
+# Ver estado de todas las tablas
+Beamflow.Database.Setup.status()
 
-# Ver información de una tabla
-:mnesia.table_info(:beamflow_workflows, :all)
-
-# Contar registros
-:mnesia.table_info(:beamflow_workflows, :size)
+# Verificar una tabla específica
+Beamflow.Database.Setup.check_table(Beamflow.Database.Workflow)
 
 # Listar workflows
 Beamflow.Storage.WorkflowStore.list_workflows()
@@ -220,7 +241,13 @@ Beamflow.Storage.WorkflowStore.list_workflows()
 Beamflow.Storage.WorkflowStore.count_by_status()
 
 # Resetear tablas (¡CUIDADO! Borra datos)
-Beamflow.Storage.MnesiaSetup.reset_tables()
+Beamflow.Database.Setup.reset!()
+
+# Backup de tablas (retorna datos para restaurar)
+Beamflow.Database.Migration.backup_all_tables()
+
+# Restaurar desde backup
+Beamflow.Database.Migration.restore_from_backup(backup_data)
 ```
 
 ### Backup y Restore
@@ -239,12 +266,18 @@ cp -r backup_mnesia/ .mnesia/dev/
 ```bash
 # Limpiar y recrear
 rm -rf .mnesia/
-iex --sname beamflow -S mix run -e "Beamflow.Storage.MnesiaSetup.install()"
+iex --sname beamflow -S mix run -e "Beamflow.Database.Setup.init()"
 ```
 
 **Error: "no disc_copies"**
 - Verifica que estás usando `--sname` o `--name`
 - El nodo debe tener nombre para usar disc_copies
+
+**Verificar estado de la base de datos**
+```elixir
+iex> Beamflow.Database.Setup.status()
+# Muestra estado de cada tabla: :exists, :missing, o :error
+```
 
 ## 🔒 Seguridad
 

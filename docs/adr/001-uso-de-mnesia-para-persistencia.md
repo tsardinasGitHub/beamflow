@@ -1,8 +1,12 @@
 ADR: Uso de Mnesia como sistema de persistencia para el estado de workflows
 
 - **Fecha:** 2025-11-27
-- **Estado:** Aceptado
+- **Estado:** ~~Aceptado~~ → **Superseded por [ADR-005](ADR-005-amnesia-migration.md)**
 - **Autores:** Taelen Sardiñas (Portfolio Personal)
+
+> ⚠️ **NOTA**: Esta decisión fue reemplazada por ADR-005 que documenta la migración de Mnesia directo a Amnesia DSL.
+> La razón principal fue mejorar la mantenibilidad del código con un DSL declarativo y structs tipados.
+> Ver [ADR-005-amnesia-migration.md](ADR-005-amnesia-migration.md) para la arquitectura actual.
 
 ---
 ## Nota del Proyecto

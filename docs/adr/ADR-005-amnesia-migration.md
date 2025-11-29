@@ -1,7 +1,21 @@
 # ADR-005: Migración de Mnesia Directo a Amnesia
 
 ## Estado
-**Aceptado** - 2025-11-29
+**Completado** - 2025-11-29
+
+## Resumen de Implementación
+
+| Componente | Estado | Descripción |
+|------------|--------|-------------|
+| `Beamflow.Database` | ✅ | 4 tablas definidas con `deftable` (Workflow, Event, Idempotency, DeadLetterEntry) |
+| `Database.Query` | ✅ | CRUD genérico + queries específicas |
+| `Database.Setup` | ✅ | Inicialización y diagnóstico |
+| `Database.Migration` | ✅ | Sistema backup/restore |
+| `WorkflowStore` | ✅ | Migrado usando adapter pattern |
+| `IdempotencyStore` | ✅ | Migrado usando adapter pattern |
+| `DeadLetterQueue` | ✅ | Migrado usando adapter pattern |
+| `MnesiaSetup` (legacy) | 🗑️ | Eliminado |
+| **Tests** | ✅ | **381 tests, 0 failures** |
 
 ## Contexto
 
@@ -105,24 +119,44 @@ El proyecto Leasing (mismo equipo) utiliza Amnesia exitosamente con:
 | Incompatibilidad con código existente | Migración gradual, mantener compatibilidad temporal |
 | Bugs en nueva implementación | Tests exhaustivos antes de producción |
 
-## Plan de Implementación
+## Plan de Implementación (Completado)
 
-### Fase 1: Preparación
-1. Agregar dependencia Amnesia al `mix.exs`
-2. Crear módulo `Beamflow.Database` con definición de tablas
-3. Implementar sistema de backup/restore
+### Fase 1: Preparación ✅
+1. ✅ Agregada dependencia `{:amnesia, "~> 0.2.8"}` al `mix.exs`
+2. ✅ Creado `lib/beamflow/database.ex` con 4 tablas: Workflow, Event, Idempotency, DeadLetterEntry
+3. ✅ Implementado `lib/beamflow/database/migration.ex` con backup_all_tables/0 y restore_from_backup/1
 
-### Fase 2: Migración
-1. Migrar `MnesiaSetup` para usar Amnesia
-2. Migrar `WorkflowStore` para usar nuevas queries
-3. Migrar `EventStore` 
-4. Migrar `IdempotencyStore`
-5. Migrar `DeadLetterQueue`
+### Fase 2: Migración ✅
+1. ✅ Creado `lib/beamflow/database/setup.ex` - reemplaza MnesiaSetup
+2. ✅ Creado `lib/beamflow/database/query.ex` - API unificada de queries
+3. ✅ Migrado `WorkflowStore` usando adapter pattern (API pública sin cambios)
+4. ✅ Migrado `IdempotencyStore` usando adapter pattern
+5. ✅ Migrado `DeadLetterQueue` usando adapter pattern
 
-### Fase 3: Limpieza
-1. Eliminar código Mnesia directo obsoleto
-2. Actualizar tests
-3. Documentar nuevo sistema
+### Fase 3: Limpieza ✅
+1. ✅ Eliminado `lib/beamflow/storage/mnesia_setup.ex`
+2. ✅ Creados 47 tests específicos para Amnesia (setup_test, query_test, tables_test)
+3. ✅ Todos los 381 tests del proyecto pasando
+4. ✅ Documentación actualizada
+
+### Archivos Creados
+```
+lib/beamflow/
+├── database.ex                    # Definición de tablas con deftable
+└── database/
+    ├── query.ex                   # CRUD y queries específicas
+    ├── setup.ex                   # Inicialización (init/1, reset!/1, status/0)
+    └── migration.ex               # Backup/restore
+
+test/beamflow/database/
+├── setup_test.exs                 # 7 tests
+├── query_test.exs                 # 26 tests
+└── tables_test.exs                # 14 tests
+```
+
+### Correcciones Aplicadas
+- **Tablas :bag**: Agregado `List.flatten/1` para manejar listas anidadas retornadas por Amnesia
+- **Sintaxis Enum.filter**: Corregida sintaxis de funciones anónimas en filtros
 
 ## Referencias
 

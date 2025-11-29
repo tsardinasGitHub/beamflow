@@ -857,9 +857,19 @@ socket = stream_delete(socket, :workflows, workflow_to_remove)
 
 ## 7. Persistencia de Datos
 
-### Mnesia: La Base de Datos de Erlang
+### Amnesia: DSL sobre Mnesia
 
-Mnesia es una base de datos distribuida que viene incluida con Erlang/OTP. No necesitas instalar nada externo.
+BeamFlow utiliza **Amnesia**, una biblioteca que proporciona un DSL (Domain Specific Language) declarativo sobre Mnesia, la base de datos distribuida de Erlang/OTP.
+
+**¿Por qué Amnesia en lugar de Mnesia directo?**
+
+| Aspecto | Mnesia Directo | Amnesia |
+|---------|----------------|---------|
+| Definición de tablas | Tuplas con `:mnesia.create_table` | `deftable` declarativo |
+| Datos | Tuplas raw | Structs tipados |
+| Queries | `:mnesia.select` verbose | DSL con `where`, `match` |
+| JSON | Manual con Jason.Encoder | Inline automático |
+| Migraciones | Manual | Backup/restore integrado |
 
 **Analogía: Las Libretas de la Oficina**
 
@@ -889,15 +899,58 @@ Mnesia es una base de datos distribuida que viene incluida con Erlang/OTP. No ne
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-En BeamFlow usamos **disc_copies** para workflows y eventos:
+En BeamFlow usamos **disc_copies** para workflows y eventos con Amnesia:
 
 ```elixir
-# lib/beamflow/storage/mnesia_setup.ex
-:mnesia.create_table(:beamflow_workflows, [
-  attributes: [:id, :workflow_module, :status, :workflow_state, ...],
-  disc_copies: [node()],  # RAM + disco
-  index: [:status]  # Índice para buscar por estado
-])
+# lib/beamflow/database.ex - Definición declarativa con Amnesia
+use Amnesia
+
+defdatabase Beamflow.Database do
+  deftable Workflow, [:id, :workflow_module, :status, :workflow_state, ...],
+    type: :set, index: [:status] do
+    @type t :: %__MODULE__{
+      id: String.t(),
+      status: atom(),
+      # ... más campos
+    }
+  end
+  
+  deftable Event, [:id, :workflow_id, :type, :data, :timestamp],
+    type: :bag, index: [:workflow_id] do
+    # Los eventos se agrupan por workflow_id (type: :bag)
+  end
+end
+```
+
+### Arquitectura de Persistencia en BeamFlow
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    CAPAS DE PERSISTENCIA                            │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │          Stores (API Pública)                               │   │
+│  │   WorkflowStore | IdempotencyStore | DeadLetterQueue        │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              ↓                                      │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │          Database.Query (CRUD Genérico)                     │   │
+│  │   get/2 | list/2 | write/1 | delete/2                       │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              ↓                                      │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │          Beamflow.Database (deftable)                       │   │
+│  │   Workflow | Event | Idempotency | DeadLetterEntry          │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              ↓                                      │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │                    Amnesia DSL                              │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              ↓                                      │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │                    Mnesia (Erlang/OTP)                      │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Event Sourcing: Guardando la Historia

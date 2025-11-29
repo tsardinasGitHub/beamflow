@@ -1,10 +1,10 @@
 # BEAMFlow Orchestrator ⚡
 
-**A Distributed, Fault-Tolerant Workflow Engine built with Elixir/OTP & Mnesia.**
+**A Distributed, Fault-Tolerant Workflow Engine built with Elixir/OTP & Amnesia (Mnesia DSL).**
 
-[![Elixir](https://img.shields.io/badge/Elixir-1.15-purple.svg)](https://elixir-lang.org/)
+[![Elixir](https://img.shields.io/badge/Elixir-1.16-purple.svg)](https://elixir-lang.org/)
 [![Phoenix](https://img.shields.io/badge/Phoenix-LiveView-orange.svg)](https://www.phoenixframework.org/)
-[![Tests](https://img.shields.io/badge/Tests-334%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-381%20passing-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## 📖 Introduction
@@ -66,7 +66,7 @@ graph TD
     A[Client API] -->|Start Workflow| B(WorkflowDispatcher)
     B -->|Spawn| C{PartitionSupervisor}
     C -->|Manage| D[WorkflowActor (GenServer)]
-    D -->|Persist State| E[(Mnesia Distributed DB)]
+    D -->|Persist State| E[(Amnesia/Mnesia DB)]
     D -->|Emit Events| F[Phoenix PubSub]
     F -->|Update| G[LiveView Dashboard]
     
@@ -75,7 +75,7 @@ graph TD
     end### Key Components
 
 1.  **WorkflowActor (GenServer):** Each active workflow is an isolated process. If it crashes, it affects *only* that workflow.
-2.  **Mnesia Cluster:** State is replicated across nodes in real-time. If a node dies, others take over.
+2.  **Amnesia/Mnesia Cluster:** State is replicated across nodes in real-time via Amnesia DSL wrapper. If a node dies, others take over.
 3.  **LiveView Dashboard:** Visualizes 10,000+ concurrent workflows in real-time using Telemetry metrics.
 
 ---
@@ -103,16 +103,16 @@ cd beamflow
 mix deps.get
 ```
 
-### 2. Initialize Mnesia Database
-Before running the application for the first time, create the Mnesia schema and tables:
+### 2. Initialize Database (Amnesia/Mnesia)
+The database initializes automatically on application start. For manual initialization or reset:
 ```bash
 # IMPORTANTE: Usar --sname para persistencia en disco
-iex --sname beamflow -S mix run -e "Beamflow.Storage.MnesiaSetup.install()"
+iex --sname beamflow -S mix run -e "Beamflow.Database.Setup.init()"
 ```
 
 This command:
-- Creates the Mnesia schema on the current node
-- Initializes the `:beamflow_workflows` and `:beamflow_events` tables
+- Creates the Amnesia/Mnesia schema on the current node
+- Initializes 4 tables: `Workflow`, `Event`, `Idempotency`, `DeadLetterEntry`
 - Uses `disc_copies` for persistence when running with a named node
 - Only needs to be run once (subsequent runs will skip if already exists)
 
