@@ -44,17 +44,18 @@ defmodule Beamflow.Engine.DeadLetterQueue do
 
   ## Almacenamiento
 
-  Las entradas se persisten en Mnesia para sobrevivir reinicios.
+  Las entradas se persisten en Amnesia (Beamflow.Database.DeadLetterEntry)
+  para sobrevivir reinicios. Ver ADR-005 para detalles de migración.
   """
 
   use GenServer
+  use Amnesia
 
   require Logger
 
   alias Beamflow.Engine.AlertSystem
-  alias Beamflow.Storage.MnesiaSetup
+  alias Beamflow.Database.DeadLetterEntry
 
-  @table :beamflow_dlq
   @ets_cache :beamflow_dlq_cache
 
   # ============================================================================
@@ -240,10 +241,7 @@ defmodule Beamflow.Engine.DeadLetterQueue do
     # Crear tabla ETS para cache rápido
     :ets.new(@ets_cache, [:named_table, :set, :public, read_concurrency: true])
 
-    # Asegurar tabla Mnesia
-    ensure_mnesia_table()
-
-    # Cargar entradas existentes en cache
+    # Cargar entradas existentes en cache (desde Amnesia)
     load_into_cache()
 
     # Programar procesamiento automático de retries
@@ -341,112 +339,73 @@ defmodule Beamflow.Engine.DeadLetterQueue do
   # ============================================================================
 
   defp create_entry(opts) do
-    now = DateTime.utc_now()
-
-    %{
-      id: generate_id(),
+    # Usar DeadLetterEntry.new/1 de Amnesia
+    DeadLetterEntry.new(%{
       type: opts[:type] || opts.type,
-      status: :pending,
       workflow_id: opts[:workflow_id] || opts.workflow_id,
       workflow_module: opts[:workflow_module] || opts.workflow_module,
       failed_step: opts[:failed_step],
       error: opts[:error],
-      context: sanitize_context(opts[:context] || %{}),
-      # Parámetros originales para retry
-      original_params: sanitize_context(opts[:original_params] || %{}),
-      metadata: opts[:metadata] || %{},
-      created_at: now,
-      updated_at: now,
-      retry_count: 0,
-      next_retry_at: calculate_next_retry(0),
-      resolution: nil
-    }
+      context: opts[:context] || %{},
+      original_params: opts[:original_params] || %{},
+      metadata: opts[:metadata] || %{}
+    })
   end
-
-  defp generate_id do
-    "dlq_" <> (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))
-  end
-
-  defp sanitize_context(context) do
-    # Remover datos sensibles del contexto
-    context
-    |> Map.drop([:password, :card_number, :cvv, :pin, :secret])
-    |> Map.new(fn {k, v} -> {k, sanitize_value(v)} end)
-  end
-
-  defp sanitize_value(value) when is_binary(value) do
-    if String.length(value) > 1000 do
-      String.slice(value, 0, 1000) <> "... [truncated]"
-    else
-      value
-    end
-  end
-  defp sanitize_value(value), do: value
-
-  defp calculate_next_retry(retry_count) do
-    # Backoff exponencial: 5min, 15min, 45min, 2h, 6h, 12h...
-    base_minutes = 5
-    max_minutes = 720  # 12 horas
-
-    delay_minutes = min(base_minutes * :math.pow(3, retry_count), max_minutes) |> round()
-
-    DateTime.add(DateTime.utc_now(), delay_minutes * 60, :second)
-  end
-
-  defp ensure_mnesia_table do
-    # Usar la misma lógica de storage que MnesiaSetup
-    # disc_copies con nodo nombrado, ram_copies con nodo anónimo
-    storage_type = MnesiaSetup.storage_type_for_env()
-    nodes = [node()]
-
-    table_opts = [
-      attributes: [:id, :data],
-      type: :set
-    ] ++ storage_opts(storage_type, nodes)
-
-    case :mnesia.create_table(@table, table_opts) do
-      {:atomic, :ok} ->
-        Logger.info("DLQ: Mnesia table created (#{storage_type})")
-
-      {:aborted, {:already_exists, @table}} ->
-        Logger.debug("DLQ: Mnesia table already exists")
-
-      {:aborted, reason} ->
-        Logger.warning("DLQ: Could not create Mnesia table: #{inspect(reason)}")
-    end
-  end
-
-  defp storage_opts(:ram_copies, nodes), do: [ram_copies: nodes]
-  defp storage_opts(:disc_copies, nodes), do: [disc_copies: nodes]
 
   defp persist_entry(entry) do
-    case :mnesia.transaction(fn ->
-      :mnesia.write({@table, entry.id, entry})
-    end) do
-      {:atomic, :ok} -> :ok
-      {:aborted, reason} -> {:error, reason}
+    Amnesia.transaction do
+      DeadLetterEntry.write(entry)
     end
+    :ok
+  rescue
+    e -> {:error, Exception.message(e)}
   end
 
   defp load_into_cache do
-    case :mnesia.transaction(fn ->
-      :mnesia.foldl(fn {_, id, data}, acc ->
-        [{id, data} | acc]
-      end, [], @table)
-    end) do
-      {:atomic, entries} ->
-        Enum.each(entries, fn {id, data} ->
-          :ets.insert(@ets_cache, {id, data})
-        end)
-        Logger.debug("DLQ: Loaded #{length(entries)} entries into cache")
+    Amnesia.transaction do
+      entries =
+        DeadLetterEntry.stream()
+        |> Enum.to_list()
+        |> List.flatten()
 
-      {:aborted, reason} ->
-        Logger.warning("DLQ: Could not load from Mnesia: #{inspect(reason)}")
+      Enum.each(entries, fn entry ->
+        :ets.insert(@ets_cache, {entry.id, entry_to_map(entry)})
+      end)
+
+      Logger.debug("DLQ: Loaded #{length(entries)} entries into cache")
     end
+  rescue
+    e ->
+      Logger.warning("DLQ: Could not load from Amnesia: #{Exception.message(e)}")
   end
 
-  defp cache_entry(entry) do
+  defp cache_entry(%DeadLetterEntry{} = entry) do
+    :ets.insert(@ets_cache, {entry.id, entry_to_map(entry)})
+  end
+
+  defp cache_entry(entry) when is_map(entry) do
     :ets.insert(@ets_cache, {entry.id, entry})
+  end
+
+  # Convierte struct Amnesia a map (para compatibilidad API)
+  defp entry_to_map(%DeadLetterEntry{} = e) do
+    %{
+      id: e.id,
+      type: e.type,
+      status: e.status,
+      workflow_id: e.workflow_id,
+      workflow_module: e.workflow_module,
+      failed_step: e.failed_step,
+      error: e.error,
+      context: e.context,
+      original_params: e.original_params,
+      metadata: e.metadata,
+      created_at: e.created_at,
+      updated_at: e.updated_at,
+      retry_count: e.retry_count,
+      next_retry_at: e.next_retry_at,
+      resolution: e.resolution
+    }
   end
 
   defp get_entry(entry_id) do
@@ -479,21 +438,26 @@ defmodule Beamflow.Engine.DeadLetterQueue do
     if entry.retry_count >= max_retries and not force do
       {:error, :max_retries_exceeded}
     else
-      # Actualizar entrada
-      updated_entry = %{entry |
-        status: :retrying,
-        retry_count: entry.retry_count + 1,
-        updated_at: DateTime.utc_now(),
-        next_retry_at: calculate_next_retry(entry.retry_count + 1)
-      }
+      # Actualizar entrada usando DeadLetterEntry.increment_retry/1
+      updated_entry =
+        Amnesia.transaction do
+          case DeadLetterEntry.read(entry.id) do
+            nil -> nil
+            existing -> DeadLetterEntry.increment_retry(existing)
+          end
+        end
 
-      persist_entry(updated_entry)
-      cache_entry(updated_entry)
+      if updated_entry do
+        persist_entry(updated_entry)
+        cache_entry(updated_entry)
 
-      # Ejecutar retry en proceso separado
-      spawn(fn -> execute_retry(updated_entry) end)
+        # Ejecutar retry en proceso separado
+        spawn(fn -> execute_retry(entry_to_map(updated_entry)) end)
 
-      {:ok, :retrying}
+        {:ok, :retrying}
+      else
+        {:error, :not_found}
+      end
     end
   end
 
@@ -520,9 +484,15 @@ defmodule Beamflow.Engine.DeadLetterQueue do
       {:error, reason} ->
         Logger.warning("DLQ: Retry failed for #{entry.id}: #{inspect(reason)}")
         # Entry stays in pending state for next retry
-        updated = %{entry | status: :pending, updated_at: DateTime.utc_now()}
-        persist_entry(updated)
-        cache_entry(updated)
+        Amnesia.transaction do
+          case DeadLetterEntry.read(entry.id) do
+            nil -> :ok
+            existing ->
+              updated = %{existing | status: :pending, updated_at: DateTime.utc_now()}
+              DeadLetterEntry.write(updated)
+              cache_entry(updated)
+          end
+        end
     end
   end
 
@@ -580,26 +550,26 @@ defmodule Beamflow.Engine.DeadLetterQueue do
   end
 
   defp do_resolve(entry, resolution_type, notes) do
-    status = if resolution_type == :abandoned, do: :abandoned, else: :resolved
+    updated_entry =
+      Amnesia.transaction do
+        case DeadLetterEntry.read(entry.id) do
+          nil -> nil
+          existing -> DeadLetterEntry.resolve(existing, resolution_type, notes)
+        end
+      end
 
-    updated_entry = %{entry |
-      status: status,
-      updated_at: DateTime.utc_now(),
-      resolution: %{
-        type: resolution_type,
-        notes: notes,
-        resolved_at: DateTime.utc_now()
-      }
-    }
+    if updated_entry do
+      case persist_entry(updated_entry) do
+        :ok ->
+          cache_entry(updated_entry)
+          Logger.info("DLQ: Entry #{entry.id} resolved as #{resolution_type}")
+          :ok
 
-    case persist_entry(updated_entry) do
-      :ok ->
-        cache_entry(updated_entry)
-        Logger.info("DLQ: Entry #{entry.id} resolved as #{resolution_type}")
-        :ok
-
-      error ->
-        error
+        error ->
+          error
+      end
+    else
+      {:error, :not_found}
     end
   end
 

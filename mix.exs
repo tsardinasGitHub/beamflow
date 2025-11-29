@@ -67,6 +67,9 @@ defmodule Beamflow.MixProject do
       {:gettext, "~> 0.24"},
       {:elixir_uuid, "~> 1.2"},
 
+      # Database - Amnesia (Mnesia DSL)
+      {:amnesia, "~> 0.2.8"},
+
       # Telemetry & Monitoring
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.1"},

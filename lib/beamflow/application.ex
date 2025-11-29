@@ -7,13 +7,13 @@ defmodule Beamflow.Application do
 
   require Logger
 
-  alias Beamflow.Storage.MnesiaSetup
+  alias Beamflow.Database.Setup, as: DatabaseSetup
 
   @impl true
   def start(_type, _args) do
-    # Iniciar Mnesia y asegurar tablas antes que cualquier supervisor
+    # Iniciar Mnesia y configurar Amnesia Database
     start_mnesia()
-    ensure_mnesia_tables()
+    init_amnesia_database()
 
     children = [
       BeamflowWeb.Telemetry,
@@ -62,16 +62,17 @@ defmodule Beamflow.Application do
     end
   end
 
-  defp ensure_mnesia_tables do
-    case MnesiaSetup.ensure_tables() do
+  # Inicializa las tablas Amnesia (Workflow, Event, Idempotency, DeadLetterEntry)
+  defp init_amnesia_database do
+    case DatabaseSetup.init() do
       :ok ->
-        Logger.info("Mnesia tables ready")
+        Logger.info("Amnesia database initialized successfully")
         :ok
 
       {:error, reason} ->
-        Logger.warning("Could not ensure Mnesia tables: #{inspect(reason)}")
-        # No fallar el arranque, las tablas pueden crearse después
-        :ok
+        Logger.error("Could not initialize Amnesia database: #{inspect(reason)}")
+        # Fallar si no podemos inicializar la BD
+        raise "Could not initialize Amnesia database: #{inspect(reason)}"
     end
   end
 

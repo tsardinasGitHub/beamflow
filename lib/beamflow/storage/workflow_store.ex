@@ -1,15 +1,15 @@
 defmodule Beamflow.Storage.WorkflowStore do
   @moduledoc """
-  Capa de persistencia para workflows usando Mnesia.
+  Capa de persistencia para workflows usando Amnesia.
 
   Este módulo proporciona operaciones CRUD para persistir el estado de los
-  workflows y su historial de ejecución. Usa transacciones Mnesia para
+  workflows y su historial de ejecución. Usa transacciones Amnesia para
   garantizar consistencia ACID.
 
-  ## Tablas
+  ## Tablas Amnesia
 
-  - `:beamflow_workflows` - Estado principal de cada workflow
-  - `:beamflow_events` - Historial de eventos (step completado, fallo, etc.)
+  - `Beamflow.Database.Workflow` - Estado principal de cada workflow
+  - `Beamflow.Database.Event` - Historial de eventos (step completado, fallo, etc.)
 
   ## Uso
 
@@ -25,16 +25,16 @@ defmodule Beamflow.Storage.WorkflowStore do
       # Registrar evento
       :ok = WorkflowStore.record_event("req-123", :step_completed, %{step: "ValidateIdentity"})
 
-  ## Transacciones
+  ## Migración
 
-  Todas las operaciones usan `:mnesia.transaction/1` para garantizar atomicidad.
-  Para operaciones de solo lectura, usamos `:mnesia.dirty_read/1` para mayor
-  rendimiento cuando la consistencia estricta no es crítica.
-
-  Ver ADR-001 para justificación de Mnesia como almacenamiento.
+  Este módulo fue migrado de Mnesia raw a Amnesia (ver ADR-005).
+  La API pública permanece igual para mantener compatibilidad.
   """
 
   require Logger
+
+  use Amnesia
+  alias Beamflow.Database.{Workflow, Event}
 
   # ============================================================================
   # Tipos
@@ -64,16 +64,12 @@ defmodule Beamflow.Storage.WorkflowStore do
           timestamp: DateTime.t()
         }
 
-  # Nombres de tablas Mnesia
-  @workflows_table :beamflow_workflows
-  @events_table :beamflow_events
-
   # ============================================================================
   # API Pública - Workflows
   # ============================================================================
 
   @doc """
-  Guarda o actualiza un workflow en Mnesia.
+  Guarda o actualiza un workflow.
 
   ## Parámetros
 
@@ -93,30 +89,30 @@ defmodule Beamflow.Storage.WorkflowStore do
   def save_workflow(actor_state) do
     now = DateTime.utc_now()
 
-    record = {
-      @workflows_table,
-      actor_state.workflow_id,
-      actor_state.workflow_module,
-      actor_state.status,
-      actor_state.workflow_state,
-      actor_state.current_step_index,
-      actor_state.total_steps,
-      actor_state.started_at,
-      actor_state.completed_at,
-      actor_state.error,
-      Map.get(actor_state, :inserted_at, now),
-      now
+    workflow = %Workflow{
+      id: actor_state.workflow_id,
+      workflow_module: actor_state.workflow_module,
+      status: actor_state.status,
+      workflow_state: actor_state.workflow_state,
+      current_step_index: actor_state.current_step_index,
+      total_steps: actor_state.total_steps,
+      started_at: actor_state.started_at,
+      completed_at: actor_state.completed_at,
+      error: actor_state.error,
+      inserted_at: Map.get(actor_state, :inserted_at, now),
+      updated_at: now
     }
 
-    case :mnesia.transaction(fn -> :mnesia.write(record) end) do
-      {:atomic, :ok} ->
-        Logger.debug("Workflow #{actor_state.workflow_id} persisted to Mnesia")
-        {:ok, record_to_map(record)}
-
-      {:aborted, reason} ->
-        Logger.error("Failed to persist workflow #{actor_state.workflow_id}: #{inspect(reason)}")
-        {:error, reason}
+    Amnesia.transaction do
+      Workflow.write(workflow)
     end
+
+    Logger.debug("Workflow #{actor_state.workflow_id} persisted via Amnesia")
+    {:ok, workflow_to_map(workflow)}
+  rescue
+    e ->
+      Logger.error("Failed to persist workflow #{actor_state.workflow_id}: #{Exception.message(e)}")
+      {:error, Exception.message(e)}
   end
 
   @doc """
@@ -138,10 +134,13 @@ defmodule Beamflow.Storage.WorkflowStore do
   """
   @spec get_workflow(String.t()) :: {:ok, workflow_record()} | {:error, :not_found}
   def get_workflow(workflow_id) do
-    # Usamos dirty_read para lecturas rápidas
-    case :mnesia.dirty_read(@workflows_table, workflow_id) do
-      [record] -> {:ok, record_to_map(record)}
-      [] -> {:error, :not_found}
+    # Usamos dirty read para lecturas rápidas
+    case :mnesia.dirty_read(Workflow, workflow_id) do
+      [record] when is_tuple(record) ->
+        {:ok, tuple_to_workflow_map(record)}
+
+      [] ->
+        {:error, :not_found}
     end
   end
 
@@ -163,11 +162,14 @@ defmodule Beamflow.Storage.WorkflowStore do
   """
   @spec get_workflow_strict(String.t()) :: {:ok, workflow_record()} | {:error, term()}
   def get_workflow_strict(workflow_id) do
-    case :mnesia.transaction(fn -> :mnesia.read(@workflows_table, workflow_id) end) do
-      {:atomic, [record]} -> {:ok, record_to_map(record)}
-      {:atomic, []} -> {:error, :not_found}
-      {:aborted, reason} -> {:error, reason}
+    Amnesia.transaction do
+      case Workflow.read(workflow_id) do
+        nil -> {:error, :not_found}
+        workflow -> {:ok, workflow_to_map(workflow)}
+      end
     end
+  rescue
+    e -> {:error, Exception.message(e)}
   end
 
   @doc """
@@ -196,27 +198,22 @@ defmodule Beamflow.Storage.WorkflowStore do
     status_filter = Keyword.get(opts, :status)
     limit = Keyword.get(opts, :limit)
 
-    # Usamos dirty_match_object para listar
-    pattern =
-      if status_filter do
-        {@workflows_table, :_, :_, status_filter, :_, :_, :_, :_, :_, :_, :_, :_}
-      else
-        {@workflows_table, :_, :_, :_, :_, :_, :_, :_, :_, :_, :_, :_}
-      end
+    Amnesia.transaction do
+      workflows =
+        Workflow.stream()
+        |> Enum.to_list()
+        |> List.flatten()
+        |> maybe_filter_by_status(status_filter)
+        |> Enum.map(&workflow_to_map/1)
+        |> Enum.sort_by(& &1.updated_at, {:desc, DateTime})
+        |> maybe_limit(limit)
 
-    records = :mnesia.dirty_match_object(pattern)
-
-    workflows =
-      records
-      |> Enum.map(&record_to_map/1)
-      |> maybe_limit(limit)
-      |> Enum.sort_by(& &1.updated_at, {:desc, DateTime})
-
-    {:ok, workflows}
+      {:ok, workflows}
+    end
   end
 
   @doc """
-  Elimina un workflow de Mnesia.
+  Elimina un workflow.
 
   También elimina todos los eventos asociados.
 
@@ -231,24 +228,24 @@ defmodule Beamflow.Storage.WorkflowStore do
   """
   @spec delete_workflow(String.t()) :: :ok | {:error, term()}
   def delete_workflow(workflow_id) do
-    transaction = fn ->
+    Amnesia.transaction do
       # Eliminar workflow
-      :mnesia.delete({@workflows_table, workflow_id})
+      Workflow.delete(workflow_id)
 
       # Eliminar eventos asociados
-      events = :mnesia.match_object({@events_table, :_, workflow_id, :_, :_, :_})
-      Enum.each(events, &:mnesia.delete_object/1)
+      Event.stream()
+      |> Enum.to_list()
+      |> List.flatten()
+      |> Enum.filter(fn e -> e.workflow_id == workflow_id end)
+      |> Enum.each(fn event -> Event.delete(event) end)
     end
 
-    case :mnesia.transaction(transaction) do
-      {:atomic, _} ->
-        Logger.info("Workflow #{workflow_id} and its events deleted from Mnesia")
-        :ok
-
-      {:aborted, reason} ->
-        Logger.error("Failed to delete workflow #{workflow_id}: #{inspect(reason)}")
-        {:error, reason}
-    end
+    Logger.info("Workflow #{workflow_id} and its events deleted")
+    :ok
+  rescue
+    e ->
+      Logger.error("Failed to delete workflow #{workflow_id}: #{Exception.message(e)}")
+      {:error, Exception.message(e)}
   end
 
   # ============================================================================
@@ -276,27 +273,18 @@ defmodule Beamflow.Storage.WorkflowStore do
   """
   @spec record_event(String.t(), atom(), map()) :: :ok | {:error, term()}
   def record_event(workflow_id, event_type, data \\ %{}) do
-    event_id = UUID.uuid4()
-    now = DateTime.utc_now()
+    event = Event.new(workflow_id, event_type, data)
 
-    record = {
-      @events_table,
-      event_id,
-      workflow_id,
-      event_type,
-      data,
-      now
-    }
-
-    case :mnesia.transaction(fn -> :mnesia.write(record) end) do
-      {:atomic, :ok} ->
-        Logger.debug("Event #{event_type} recorded for workflow #{workflow_id}")
-        :ok
-
-      {:aborted, reason} ->
-        Logger.error("Failed to record event for #{workflow_id}: #{inspect(reason)}")
-        {:error, reason}
+    Amnesia.transaction do
+      Event.write(event)
     end
+
+    Logger.debug("Event #{event_type} recorded for workflow #{workflow_id}")
+    :ok
+  rescue
+    e ->
+      Logger.error("Failed to record event for #{workflow_id}: #{Exception.message(e)}")
+      {:error, Exception.message(e)}
   end
 
   @doc """
@@ -326,20 +314,19 @@ defmodule Beamflow.Storage.WorkflowStore do
     event_type_filter = Keyword.get(opts, :event_type)
     limit = Keyword.get(opts, :limit)
 
-    pattern =
-      if event_type_filter do
-        {@events_table, :_, workflow_id, event_type_filter, :_, :_}
-      else
-        {@events_table, :_, workflow_id, :_, :_, :_}
-      end
+    Amnesia.transaction do
+      events =
+        Event.stream()
+        |> Enum.to_list()
+        |> List.flatten()
+        |> Enum.filter(fn e -> e.workflow_id == workflow_id end)
+        |> maybe_filter_by_event_type(event_type_filter)
+        |> Enum.map(&event_to_map/1)
+        |> Enum.sort_by(& &1.timestamp, DateTime)
+        |> maybe_limit(limit)
 
-    events =
-      :mnesia.dirty_match_object(pattern)
-      |> Enum.map(&event_record_to_map/1)
-      |> Enum.sort_by(& &1.timestamp, DateTime)
-      |> maybe_limit(limit)
-
-    {:ok, events}
+      {:ok, events}
+    end
   end
 
   # ============================================================================
@@ -372,7 +359,7 @@ defmodule Beamflow.Storage.WorkflowStore do
   end
 
   @doc """
-  Verifica si las tablas de Mnesia están disponibles.
+  Verifica si las tablas Amnesia están disponibles.
 
   ## Retorno
 
@@ -382,17 +369,34 @@ defmodule Beamflow.Storage.WorkflowStore do
   @spec tables_available?() :: boolean()
   def tables_available? do
     tables = :mnesia.system_info(:tables)
-    @workflows_table in tables and @events_table in tables
+    Workflow in tables and Event in tables
   end
 
   # ============================================================================
   # Funciones Privadas
   # ============================================================================
 
-  defp record_to_map(
-         {_table, id, workflow_module, status, workflow_state, current_step_index, total_steps,
-          started_at, completed_at, error, inserted_at, updated_at}
-       ) do
+  # Convierte struct Workflow a map (API compatible)
+  defp workflow_to_map(%Workflow{} = w) do
+    %{
+      id: w.id,
+      workflow_module: w.workflow_module,
+      status: w.status,
+      workflow_state: w.workflow_state,
+      current_step_index: w.current_step_index,
+      total_steps: w.total_steps,
+      started_at: w.started_at,
+      completed_at: w.completed_at,
+      error: w.error,
+      inserted_at: w.inserted_at,
+      updated_at: w.updated_at
+    }
+  end
+
+  # Convierte tupla Mnesia raw a map (para dirty_read)
+  defp tuple_to_workflow_map({Workflow, id, workflow_module, status, workflow_state,
+                              current_step_index, total_steps, started_at, completed_at,
+                              error, inserted_at, updated_at}) do
     %{
       id: id,
       workflow_module: workflow_module,
@@ -408,14 +412,25 @@ defmodule Beamflow.Storage.WorkflowStore do
     }
   end
 
-  defp event_record_to_map({_table, id, workflow_id, event_type, data, timestamp}) do
+  # Convierte struct Event a map
+  defp event_to_map(%Event{} = e) do
     %{
-      id: id,
-      workflow_id: workflow_id,
-      event_type: event_type,
-      data: data,
-      timestamp: timestamp
+      id: e.id,
+      workflow_id: e.workflow_id,
+      event_type: e.event_type,
+      data: e.data,
+      timestamp: e.timestamp
     }
+  end
+
+  defp maybe_filter_by_status(workflows, nil), do: workflows
+  defp maybe_filter_by_status(workflows, status) do
+    Enum.filter(workflows, fn w -> w.status == status end)
+  end
+
+  defp maybe_filter_by_event_type(events, nil), do: events
+  defp maybe_filter_by_event_type(events, event_type) do
+    Enum.filter(events, fn e -> e.event_type == event_type end)
   end
 
   defp maybe_limit(list, nil), do: list
