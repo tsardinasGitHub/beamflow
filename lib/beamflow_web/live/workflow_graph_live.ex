@@ -1288,13 +1288,22 @@ defmodule BeamflowWeb.WorkflowGraphLive do
         # Calcular dimensiones del SVG
         {svg_width, svg_height} = calculate_svg_dimensions(nodes)
 
+        # Actualizar también el nodo seleccionado si existe
+        updated_selected_node =
+          if socket.assigns[:selected_node] do
+            Enum.find(nodes, &(&1.id == socket.assigns.selected_node.id))
+          else
+            nil
+          end
+
         assign(socket,
           nodes: nodes,
           edges: edges,
           svg_width: svg_width,
           svg_height: svg_height,
           node_width: @node_width,
-          node_height: @node_height
+          node_height: @node_height,
+          selected_node: updated_selected_node
         )
     end
   end
@@ -1512,6 +1521,13 @@ defmodule BeamflowWeb.WorkflowGraphLive do
     |> List.last()
   end
 
+  defp format_step_label(module_string) when is_binary(module_string) do
+    # Para strings como "Elixir.Beamflow.Domains.Insurance.Steps.ValidateIdentity"
+    module_string
+    |> String.split(".")
+    |> List.last()
+  end
+
   defp format_step_label(_), do: "Step"
 
   defp format_module_full(module) when is_atom(module) do
@@ -1607,12 +1623,22 @@ defmodule BeamflowWeb.WorkflowGraphLive do
 
   defp describe_event(event) do
     event_data = Map.get(event, :data, %{}) || %{}
-    step_info = if event_data[:step_index] do
-      step_module = event_data[:step_module]
-      step_name = if step_module, do: format_step_label(step_module), else: "Step #{event_data[:step_index]}"
-      " - #{step_name}"
-    else
-      ""
+    step_info = cond do
+      # Preferir el nombre del step si está disponible
+      event_data[:step] ->
+        step_name = event_data[:step] |> to_string() |> format_step_label()
+        " - #{step_name}"
+
+      # Fallback al módulo si está disponible
+      event_data[:step_module] ->
+        " - #{format_step_label(event_data[:step_module])}"
+
+      # Último recurso: usar índice (1-based para humanos)
+      event_data[:step_index] ->
+        " - Step #{event_data[:step_index] + 1}"
+
+      true ->
+        ""
     end
 
     case event.event_type do
