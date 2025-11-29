@@ -1,4 +1,4 @@
-# ADR-005: Migración de Mnesia Directo a Amnesia
+# ADR-011: Migración de Mnesia Directo a Amnesia
 
 ## Estado
 **Completado** - 2025-11-29

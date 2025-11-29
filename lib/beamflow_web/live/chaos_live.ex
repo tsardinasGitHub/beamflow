@@ -57,6 +57,11 @@ defmodule BeamflowWeb.ChaosLive do
   end
 
   @impl true
+  def handle_info(:clear_flash, socket) do
+    {:noreply, clear_flash(socket)}
+  end
+
+  @impl true
   def handle_event("toggle_chaos", _params, socket) do
     if socket.assigns.chaos_enabled do
       ChaosMonkey.stop()
@@ -86,12 +91,15 @@ defmodule BeamflowWeb.ChaosLive do
 
     case ChaosMonkey.inject(type_atom, target: :random_workflow) do
       :ok ->
+        Process.send_after(self(), :clear_flash, 4_000)
         {:noreply, put_flash(socket, :info, "Fallo #{type} inyectado")}
 
       {:error, :chaos_not_enabled} ->
+        Process.send_after(self(), :clear_flash, 5_000)
         {:noreply, put_flash(socket, :error, "ChaosMonkey no está activo")}
 
       {:error, reason} ->
+        Process.send_after(self(), :clear_flash, 5_000)
         {:noreply, put_flash(socket, :error, "Error: #{inspect(reason)}")}
     end
   end
@@ -100,6 +108,8 @@ defmodule BeamflowWeb.ChaosLive do
   def handle_event("reset_stats", _params, socket) do
     ChaosMonkey.reset_stats()
     IdempotencyValidator.reset()
+
+    Process.send_after(self(), :clear_flash, 4_000)
 
     socket =
       socket

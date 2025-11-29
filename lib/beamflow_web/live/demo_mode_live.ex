@@ -84,6 +84,11 @@ defmodule BeamflowWeb.DemoModeLive do
   end
 
   @impl true
+  def handle_info(:clear_flash, socket) do
+    {:noreply, clear_flash(socket)}
+  end
+
+  @impl true
   def handle_info(_, socket), do: {:noreply, socket}
 
   @impl true
@@ -100,7 +105,7 @@ defmodule BeamflowWeb.DemoModeLive do
             last_created: [%{id: workflow_id, params: params} | Enum.take(socket.assigns.last_created, 4)],
             stats: load_stats()
           )
-          |> put_flash(:info, "✅ Workflow #{workflow_id} creado")
+          |> put_flash_auto_hide(:info, "✅ Workflow #{workflow_id} creado")
 
         {:noreply, socket}
 
@@ -108,7 +113,7 @@ defmodule BeamflowWeb.DemoModeLive do
         socket =
           socket
           |> assign(creating: false)
-          |> put_flash(:error, "❌ Error: #{inspect(reason)}")
+          |> put_flash_auto_hide(:error, "❌ Error: #{inspect(reason)}", 5_000)
 
         {:noreply, socket}
     end
@@ -146,7 +151,7 @@ defmodule BeamflowWeb.DemoModeLive do
         last_created: last_created ++ Enum.take(socket.assigns.last_created, 5 - length(last_created)),
         stats: load_stats()
       )
-      |> put_flash(:info, "✅ #{successful}/#{batch_size} workflows creados")
+      |> put_flash_auto_hide(:info, "✅ #{successful}/#{batch_size} workflows creados")
 
     {:noreply, socket}
   end
@@ -164,7 +169,7 @@ defmodule BeamflowWeb.DemoModeLive do
       socket =
         socket
         |> assign(chaos_enabled: false)
-        |> put_flash(:info, "🛑 Chaos Mode desactivado")
+        |> put_flash_auto_hide(:info, "🛑 Chaos Mode desactivado")
 
       {:noreply, socket}
     else
@@ -174,7 +179,7 @@ defmodule BeamflowWeb.DemoModeLive do
       socket =
         socket
         |> assign(chaos_enabled: true)
-        |> put_flash(:warning, "💥 Chaos Mode activado (#{profile})")
+        |> put_flash_auto_hide(:warning, "💥 Chaos Mode activado (#{profile})")
 
       {:noreply, socket}
     end
@@ -187,7 +192,7 @@ defmodule BeamflowWeb.DemoModeLive do
     socket =
       if socket.assigns.chaos_enabled do
         ChaosMonkey.set_profile(profile_atom)
-        put_flash(socket, :info, "Perfil cambiado a #{profile}")
+        put_flash_auto_hide(socket, :info, "Perfil cambiado a #{profile}")
       else
         socket
       end

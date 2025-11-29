@@ -53,6 +53,11 @@ defmodule BeamflowWeb.ResilienceLive do
   end
 
   @impl true
+  def handle_info(:clear_flash, socket) do
+    {:noreply, clear_flash(socket)}
+  end
+
+  @impl true
   def handle_event("change_tab", %{"tab" => tab}, socket) do
     {:noreply, assign(socket, active_tab: String.to_existing_atom(tab))}
   end
@@ -65,13 +70,13 @@ defmodule BeamflowWeb.ResilienceLive do
       :ok ->
         socket =
           socket
-          |> put_flash(:info, "Circuit breaker #{name} reseteado")
+          |> put_flash_auto_hide(:info, "Circuit breaker #{name} reseteado")
           |> load_circuit_breakers()
 
         {:noreply, socket}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Error: #{inspect(reason)}")}
+        {:noreply, put_flash_auto_hide(socket, :error, "Error: #{inspect(reason)}", 5_000)}
     end
   end
 
@@ -81,13 +86,13 @@ defmodule BeamflowWeb.ResilienceLive do
       {:ok, _} ->
         socket =
           socket
-          |> put_flash(:info, "Reintento programado para #{id}")
+          |> put_flash_auto_hide(:info, "Reintento programado para #{id}")
           |> load_dlq_entries()
 
         {:noreply, socket}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Error: #{inspect(reason)}")}
+        {:noreply, put_flash_auto_hide(socket, :error, "Error: #{inspect(reason)}", 5_000)}
     end
   end
 
@@ -99,13 +104,13 @@ defmodule BeamflowWeb.ResilienceLive do
       {:ok, _} ->
         socket =
           socket
-          |> put_flash(:info, "Entrada #{id} marcada como #{resolution}")
+          |> put_flash_auto_hide(:info, "Entrada #{id} marcada como #{resolution}")
           |> load_dlq_entries()
 
         {:noreply, socket}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Error: #{inspect(reason)}")}
+        {:noreply, put_flash_auto_hide(socket, :error, "Error: #{inspect(reason)}", 5_000)}
     end
   end
 

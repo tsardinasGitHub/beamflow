@@ -108,6 +108,11 @@ defmodule BeamflowWeb.WorkflowGraphLive do
   end
 
   @impl true
+  def handle_info(:clear_flash, socket) do
+    {:noreply, clear_flash(socket)}
+  end
+
+  @impl true
   def handle_event("select_node", %{"node-id" => node_id}, socket) do
     node = Enum.find(socket.assigns.nodes, &(&1.id == node_id))
 
@@ -200,6 +205,7 @@ defmodule BeamflowWeb.WorkflowGraphLive do
 
         {:noreply, socket}
       else
+        Process.send_after(self(), :clear_flash, 5_000)
         {:noreply, put_flash(socket, :error, "No hay eventos para reproducir")}
       end
     end

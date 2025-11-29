@@ -48,15 +48,20 @@ defmodule BeamflowWeb.WorkflowDetailsLive do
   end
 
   @impl true
+  def handle_info(:clear_flash, socket) do
+    {:noreply, clear_flash(socket)}
+  end
+
+  @impl true
   def handle_event("retry", _params, socket) do
     workflow_id = socket.assigns.workflow_id
 
     case WorkflowActor.execute_next_step(workflow_id) do
       :ok ->
-        {:noreply, put_flash(socket, :info, "Reintentando step...")}
+        {:noreply, put_flash_auto_hide(socket, :info, "Reintentando step...")}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Error: #{inspect(reason)}")}
+        {:noreply, put_flash_auto_hide(socket, :error, "Error: #{inspect(reason)}", 5_000)}
     end
   end
 

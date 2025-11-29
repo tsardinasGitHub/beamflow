@@ -55,6 +55,12 @@ defmodule BeamflowWeb do
         layout: {BeamflowWeb.Layouts, :app}
 
       unquote(html_helpers())
+
+      # Flash con auto-hide
+      defp put_flash_auto_hide(socket, kind, message, timeout \\ 3_000) do
+        Process.send_after(self(), :clear_flash, timeout)
+        Phoenix.LiveView.put_flash(socket, kind, message)
+      end
     end
   end
 

@@ -214,20 +214,34 @@ defmodule BeamflowWeb.WorkflowExplorerLive do
       {:ok, _pid} ->
         # Programar actualización después de que el workflow se persista
         Process.send_after(self(), {:refresh_for_new_workflow, workflow_id}, 100)
-        # Auto-hide flash después de 3 segundos
-        Process.send_after(self(), :clear_flash, 3_000)
-        {:noreply, put_flash(socket, :info, "Workflow #{workflow_id} creado")}
+        {:noreply, put_flash_auto_hide(socket, :info, "Workflow #{workflow_id} creado")}
 
       {:error, reason} ->
-        Process.send_after(self(), :clear_flash, 5_000)
-        {:noreply, put_flash(socket, :error, "Error: #{inspect(reason)}")}
+        {:noreply, put_flash_auto_hide(socket, :error, "Error: #{inspect(reason)}", 5_000)}
     end
   end
 
   @impl true
   def handle_event("retry_workflow", %{"id" => id}, socket) do
-    # TODO: Implementar retry
-    {:noreply, put_flash(socket, :info, "Retry de #{id} programado")}
+    case WorkflowStore.get_workflow(id) do
+      {:ok, workflow} ->
+        # Reiniciar el workflow con los mismos parámetros
+        case WorkflowSupervisor.start_workflow(
+          workflow.workflow_module,
+          id <> "-retry-#{:rand.uniform(999)}",
+          workflow.workflow_state
+        ) do
+          {:ok, _pid} ->
+            Process.send_after(self(), {:refresh_for_new_workflow, id}, 100)
+            {:noreply, put_flash_auto_hide(socket, :info, "Reintento de #{id} iniciado")}
+
+          {:error, reason} ->
+            {:noreply, put_flash_auto_hide(socket, :error, "Error al reintentar: #{inspect(reason)}", 5_000)}
+        end
+
+      {:error, _reason} ->
+        {:noreply, put_flash_auto_hide(socket, :error, "Workflow #{id} no encontrado", 5_000)}
+    end
   end
 
   @impl true
