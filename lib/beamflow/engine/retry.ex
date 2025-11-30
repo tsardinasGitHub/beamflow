@@ -851,7 +851,7 @@ defmodule Beamflow.Engine.Retry do
   ## Categorías
 
   | Categoría | Acción | Ejemplo |
-  |-----------|--------|---------|  
+  |-----------|--------|---------|
   | `:transient` | Retry automático | timeout, rate_limited |
   | `:recoverable` | Esperar corrección + retry manual | missing_dni, pending_approval |
   | `:permanent` | Solo retry forzado con confirmación | fraud_detected, blacklisted |
