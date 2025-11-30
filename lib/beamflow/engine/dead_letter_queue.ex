@@ -600,6 +600,7 @@ defmodule Beamflow.Engine.DeadLetterQueue do
       |> Enum.filter(fn entry ->
         entry.status == :pending and
         entry.next_retry_at != nil and
+        entry.error_class != :permanent and
         DateTime.compare(entry.next_retry_at, now) != :gt
       end)
 
@@ -623,16 +624,26 @@ defmodule Beamflow.Engine.DeadLetterQueue do
         :workflow_failed -> :medium
       end
 
+    # Agregar indicador de error permanente en el mensaje
+    message =
+      if entry.error_class == :permanent do
+        "Workflow #{entry.workflow_id} added to DLQ (⚠️ ERROR PERMANENTE - requiere intervención manual)"
+      else
+        "Workflow #{entry.workflow_id} added to DLQ"
+      end
+
     AlertSystem.send_alert(%{
       severity: severity,
       type: :dlq_entry_created,
       title: "DLQ Entry: #{entry.type}",
-      message: "Workflow #{entry.workflow_id} added to DLQ",
+      message: message,
       metadata: %{
         entry_id: entry.id,
         workflow_id: entry.workflow_id,
         failed_step: inspect(entry.failed_step),
-        error: inspect(entry.error)
+        error: inspect(entry.error),
+        error_class: entry.error_class,
+        retryable: entry.error_class != :permanent
       }
     })
   end

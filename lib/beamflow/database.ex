@@ -254,7 +254,7 @@ defdatabase Beamflow.Database do
      :error, :error_class, :context, :original_params, :metadata, :created_at, :updated_at,
      :retry_count, :next_retry_at, :resolution],
     type: :set,
-    index: [:status, :type, :workflow_id] do
+    index: [:status, :type, :workflow_id, :error_class] do
 
     @type entry_type :: :workflow_failed | :compensation_failed | :critical_failure
     @type entry_status :: :pending | :retrying | :resolved | :abandoned
@@ -320,19 +320,25 @@ defdatabase Beamflow.Database do
       }
     end
 
-    # Clasifica el error usando el módulo Retry si está disponible
+    @doc """
+    Verifica si esta entrada es reintentable automáticamente.
+
+    Retorna `false` para errores permanentes como `:missing_dni`.
+    """
+    @spec retryable?(t()) :: boolean()
+    def retryable?(%__MODULE__{error_class: :permanent}), do: false
+    def retryable?(%__MODULE__{}), do: true
+
+    # Clasifica el error para determinar si es reintentable
     defp classify_error(error) do
-      # Intentar usar Retry.classify_error/1 si está disponible
-      # para evitar duplicar la lógica de clasificación
       try do
         Beamflow.Engine.Retry.classify_error(error)
       rescue
-        # Si Retry no está cargado aún (durante compilación), usar clasificación básica
         _ -> basic_classify_error(error)
       end
     end
 
-    # Clasificación básica de errores (fallback)
+    # Clasificación básica de errores (fallback durante compilación)
     defp basic_classify_error(error) when is_atom(error) do
       permanent = [
         :missing_dni, :missing_email, :missing_required_field,
