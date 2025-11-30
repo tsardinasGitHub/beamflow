@@ -597,10 +597,12 @@ defmodule Beamflow.Engine.DeadLetterQueue do
     due_entries =
       :ets.tab2list(@ets_cache)
       |> Enum.map(fn {_, e} -> e end)
+      # Solo procesar errores transitorios para retry automático
+      # :recoverable, :permanent y :terminal requieren intervención manual
       |> Enum.filter(fn entry ->
         entry.status == :pending and
         entry.next_retry_at != nil and
-        entry.error_class != :permanent and
+        entry.error_class == :transient and
         DateTime.compare(entry.next_retry_at, now) != :gt
       end)
 
@@ -624,13 +626,17 @@ defmodule Beamflow.Engine.DeadLetterQueue do
         :workflow_failed -> :medium
       end
 
-    # Agregar indicador de error permanente en el mensaje
-    message =
-      if entry.error_class == :permanent do
-        "Workflow #{entry.workflow_id} added to DLQ (⚠️ ERROR PERMANENTE - requiere intervención manual)"
-      else
-        "Workflow #{entry.workflow_id} added to DLQ"
+    # Mensaje diferenciado según la clase de error
+    {icon, action_msg} =
+      case entry.error_class do
+        :terminal -> {"🚫", "TERMINAL - será archivado"}
+        :permanent -> {"⚠️", "PERMANENTE - requiere decisión humana"}
+        :recoverable -> {"✏️", "RECUPERABLE - requiere corrección de datos"}
+        :transient -> {"🔄", "TRANSITORIO - se reintentará automáticamente"}
+        :unknown -> {"❓", "NO CLASIFICADO - tratado como transitorio"}
       end
+
+    message = "Workflow #{entry.workflow_id} added to DLQ (#{icon} #{action_msg})"
 
     AlertSystem.send_alert(%{
       severity: severity,
@@ -643,7 +649,9 @@ defmodule Beamflow.Engine.DeadLetterQueue do
         failed_step: inspect(entry.failed_step),
         error: inspect(entry.error),
         error_class: entry.error_class,
-        retryable: entry.error_class != :permanent
+        auto_retryable: entry.error_class == :transient,
+        manual_retryable: entry.error_class in [:transient, :recoverable, :unknown],
+        force_retryable: entry.error_class == :permanent
       }
     })
   end

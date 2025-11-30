@@ -257,8 +257,8 @@ defdatabase Beamflow.Database do
     index: [:status, :type, :workflow_id, :error_class] do
 
     @type entry_type :: :workflow_failed | :compensation_failed | :critical_failure
-    @type entry_status :: :pending | :retrying | :resolved | :abandoned
-    @type error_class :: :transient | :permanent | :unknown
+    @type entry_status :: :pending | :retrying | :resolved | :abandoned | :archived
+    @type error_class :: :transient | :recoverable | :permanent | :terminal | :unknown
 
     @type t :: %__MODULE__{
       id: String.t(),
@@ -282,14 +282,16 @@ defdatabase Beamflow.Database do
     @doc """
     Crea una nueva entrada DLQ.
 
-    Automáticamente clasifica el error como `:transient`, `:permanent` o `:unknown`
-    para determinar si el workflow puede ser reintentado automáticamente.
+    Automáticamente clasifica el error en una de 4 categorías:
 
     ## Error Classes
 
-    - `:transient` - Errores temporales (timeout, service_unavailable) - reintentable
-    - `:permanent` - Errores de validación (missing_dni, invalid_format) - requiere intervención
-    - `:unknown` - No clasificado - se trata como transient por defecto
+    | Clase | Acción | Retry |
+    |-------|--------|-------|
+    | `:transient` | Retry automático | ✓ Auto |
+    | `:recoverable` | Esperar corrección | ✓ Manual |
+    | `:permanent` | Decisión humana | ⚠️ Forzar |
+    | `:terminal` | Archivar | ✗ Nunca |
     """
     @spec new(map()) :: t()
     def new(attrs) do
@@ -297,13 +299,17 @@ defdatabase Beamflow.Database do
       error = attrs[:error]
       error_class = classify_error(error)
 
-      # Solo calcular next_retry si el error es potencialmente reintentable
-      next_retry = if error_class == :permanent, do: nil, else: calculate_next_retry(0)
+      # Solo calcular next_retry para errores transitorios (retry automático)
+      # recoverable, permanent y terminal no tienen retry automático
+      next_retry = if error_class == :transient, do: calculate_next_retry(0), else: nil
+
+      # Status inicial depende de la clase de error
+      initial_status = if error_class == :terminal, do: :archived, else: :pending
 
       %__MODULE__{
         id: generate_id(),
         type: attrs[:type],
-        status: :pending,
+        status: initial_status,
         workflow_id: attrs[:workflow_id],
         workflow_module: attrs[:workflow_module],
         failed_step: attrs[:failed_step],
@@ -321,12 +327,42 @@ defdatabase Beamflow.Database do
     end
 
     @doc """
-    Verifica si esta entrada es reintentable automáticamente.
+    Verifica si esta entrada permite retry automático.
 
-    Retorna `false` para errores permanentes como `:missing_dni`.
+    Solo errores `:transient` y `:unknown` permiten retry automático.
+    """
+    @spec auto_retryable?(t()) :: boolean()
+    def auto_retryable?(%__MODULE__{error_class: class}) when class in [:transient, :unknown], do: true
+    def auto_retryable?(%__MODULE__{}), do: false
+
+    @doc """
+    Verifica si esta entrada permite retry manual (después de corrección).
+
+    Errores `:transient`, `:recoverable` y `:unknown` permiten retry manual.
+    """
+    @spec manual_retryable?(t()) :: boolean()
+    def manual_retryable?(%__MODULE__{error_class: :terminal}), do: false
+    def manual_retryable?(%__MODULE__{error_class: :permanent}), do: false
+    def manual_retryable?(%__MODULE__{}), do: true
+
+    @doc """
+    Verifica si esta entrada permite retry forzado (con confirmación).
+
+    Errores `:permanent` permiten retry forzado por un operador.
+    Errores `:terminal` nunca permiten retry.
+    """
+    @spec force_retryable?(t()) :: boolean()
+    def force_retryable?(%__MODULE__{error_class: :permanent}), do: true
+    def force_retryable?(%__MODULE__{error_class: :terminal}), do: false
+    def force_retryable?(%__MODULE__{}), do: true
+
+    @doc """
+    Verifica si esta entrada es reintentable de alguna forma.
+
+    Retorna `false` solo para errores `:terminal`.
     """
     @spec retryable?(t()) :: boolean()
-    def retryable?(%__MODULE__{error_class: :permanent}), do: false
+    def retryable?(%__MODULE__{error_class: :terminal}), do: false
     def retryable?(%__MODULE__{}), do: true
 
     # Clasifica el error para determinar si es reintentable
@@ -340,10 +376,20 @@ defdatabase Beamflow.Database do
 
     # Clasificación básica de errores (fallback durante compilación)
     defp basic_classify_error(error) when is_atom(error) do
+      terminal = [
+        :external_system_deprecated, :workflow_cancelled, :workflow_expired,
+        :data_corrupted, :unrecoverable_state
+      ]
+
       permanent = [
+        :fraud_detected, :applicant_blacklisted, :unauthorized, :forbidden,
+        :duplicate_request, :credit_score_too_low
+      ]
+
+      recoverable = [
         :missing_dni, :missing_email, :missing_required_field,
         :invalid_dni_format, :invalid_email_format, :invalid_input,
-        :validation_failed, :unauthorized, :forbidden
+        :validation_failed, :pending_approval, :pending_verification
       ]
 
       transient = [
@@ -352,7 +398,9 @@ defdatabase Beamflow.Database do
       ]
 
       cond do
+        error in terminal -> :terminal
         error in permanent -> :permanent
+        error in recoverable -> :recoverable
         error in transient -> :transient
         true -> :unknown
       end

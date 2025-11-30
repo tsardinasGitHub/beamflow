@@ -7,14 +7,14 @@ defmodule Beamflow.Engine.Retry do
 
   ## Filosofía de Diseño
 
-  No todos los errores son iguales:
+  No todos los errores son iguales. BEAMFlow clasifica errores en 4 categorías:
 
-  | Tipo de Error | Ejemplo | ¿Retry? |
-  |---------------|---------|---------|
-  | **Transitorio** | Timeout de red, 503 | ✓ Sí, con backoff |
-  | **Validación** | DNI inválido | ✗ No, falla permanente |
-  | **Límite** | Rate limit (429) | ✓ Sí, con delay específico |
-  | **Fatal** | Auth inválida (401) | ✗ No, requiere intervención |
+  | Categoría | Ejemplo | Acción | Retry |
+  |-----------|---------|--------|-------|
+  | `:transient` | Timeout, 503, rate_limit | Retry automático | ✓ Auto |
+  | `:recoverable` | missing_dni, pending_approval | Esperar corrección | ✓ Manual |
+  | `:permanent` | fraud_detected, blacklisted | Requiere decisión | ⚠️ Forzar |
+  | `:terminal` | system_deprecated, cancelled | Archivar | ✗ Nunca |
 
   ## Configuración por Step
 
@@ -503,30 +503,29 @@ defmodule Beamflow.Engine.Retry do
   end
 
   @doc """
-  Lista de errores considerados permanentes (requieren intervención manual).
+  Lista de errores recuperables (requieren corrección externa + retry manual).
 
-  Estos errores indican problemas con los datos de entrada o configuración
-  que no se resolverán con reintentos automáticos.
+  Estos errores pueden resolverse si alguien corrige los datos de entrada
+  o completa una acción pendiente. El sistema espera la corrección.
 
-  ## Categorías
+  ## Subcategorías
 
-  - **Validación**: Datos faltantes o formato inválido
-  - **Autenticación**: Credenciales inválidas o expiradas
-  - **Autorización**: Permisos insuficientes
-  - **Negocio**: Reglas de negocio no cumplidas
+  - **Datos faltantes**: El usuario puede proveer el dato faltante
+  - **Formato inválido**: El usuario puede corregir el formato
+  - **Pendientes**: Requieren una acción externa (aprobación, verificación)
 
   ## Ejemplo
 
-      iex> Retry.permanent_error?(:missing_dni)
+      iex> Retry.recoverable_error?(:missing_dni)
       true
 
-      iex> Retry.permanent_error?(:timeout)
+      iex> Retry.recoverable_error?(:fraud_detected)
       false
   """
-  @spec permanent_errors() :: [atom()]
-  def permanent_errors do
+  @spec recoverable_errors() :: [atom()]
+  def recoverable_errors do
     [
-      # Errores de validación - datos faltantes
+      # Errores de validación - datos faltantes (corregibles)
       :missing_dni,
       :missing_email,
       :missing_required_field,
@@ -535,7 +534,7 @@ defmodule Beamflow.Engine.Retry do
       :missing_phone,
       :missing_address,
 
-      # Errores de validación - formato inválido
+      # Errores de validación - formato inválido (corregibles)
       :invalid_dni_format,
       :invalid_email_format,
       :invalid_phone_format,
@@ -544,15 +543,58 @@ defmodule Beamflow.Engine.Retry do
       :validation_failed,
       :schema_validation_failed,
 
-      # Errores de autenticación/autorización
+      # Errores de autenticación (renovables)
+      :token_expired,
+      :session_expired,
+      :credentials_expired,
+
+      # Errores pendientes de acción externa
+      :pending_approval,
+      :pending_verification,
+      :pending_payment,
+      :pending_document,
+      :awaiting_confirmation,
+
+      # Errores de configuración (corregibles por admin)
+      :invalid_configuration,
+      :missing_configuration
+    ]
+  end
+
+  @doc """
+  Lista de errores permanentes (requieren decisión humana, solo retry forzado).
+
+  Estos errores indican decisiones de negocio o violaciones de políticas
+  que probablemente no cambiarán. Solo un operador con conocimiento del
+  contexto puede decidir si reintentar.
+
+  ## Subcategorías
+
+  - **Seguridad**: Fraude detectado, credenciales inválidas
+  - **Reglas de negocio**: Blacklist, límites excedidos
+  - **Políticas**: Rechazos por política de la empresa
+
+  ## Ejemplo
+
+      iex> Retry.permanent_error?(:fraud_detected)
+      true
+
+      iex> Retry.permanent_error?(:missing_dni)
+      false  # Este es :recoverable
+  """
+  @spec permanent_errors() :: [atom()]
+  def permanent_errors do
+    [
+      # Errores de seguridad (decisión humana requerida)
+      :fraud_detected,
+      :suspicious_activity,
       :unauthorized,
       :forbidden,
       :invalid_credentials,
-      :token_expired,
       :invalid_token,
       :permission_denied,
 
-      # Errores de negocio
+      # Errores de reglas de negocio (políticas)
       :applicant_blacklisted,
       :policy_already_exists,
       :duplicate_request,
@@ -560,27 +602,88 @@ defmodule Beamflow.Engine.Retry do
       :vehicle_not_insurable,
       :request_rejected,
       :max_age_exceeded,
-
-      # Errores de configuración
-      :invalid_configuration,
-      :missing_configuration,
-      :workflow_not_found,
-      :step_not_found
+      :coverage_denied,
+      :underwriting_rejected
     ]
   end
 
   @doc """
-  Verifica si un error es permanente (no retryable bajo ninguna circunstancia).
+  Lista de errores terminales (workflow debe archivarse, nunca reintentar).
+
+  Estos errores indican que el workflow no tiene sentido continuar:
+  el sistema externo ya no existe, el workflow fue cancelado explícitamente,
+  o las condiciones hacen imposible cualquier resolución.
+
+  ## Subcategorías
+
+  - **Sistema**: El sistema/servicio externo fue deprecado o removido
+  - **Workflow**: El workflow fue cancelado o expiró
+  - **Irreversible**: La operación ya no es posible
 
   ## Ejemplo
 
-      iex> Retry.permanent_error?(:missing_dni)
+      iex> Retry.terminal_error?(:external_system_deprecated)
       true
 
-      iex> Retry.permanent_error?(:timeout)
+      iex> Retry.terminal_error?(:timeout)
       false
+  """
+  @spec terminal_errors() :: [atom()]
+  def terminal_errors do
+    [
+      # Sistema externo no disponible permanentemente
+      :external_system_deprecated,
+      :external_system_removed,
+      :api_version_unsupported,
+      :service_discontinued,
+      :provider_terminated,
 
-      iex> Retry.permanent_error?({:missing_dni, "DNI es requerido"})
+      # Workflow cancelado o expirado
+      :workflow_cancelled,
+      :workflow_expired,
+      :request_expired,
+      :offer_expired,
+      :manually_terminated,
+
+      # Errores irreversibles
+      :data_corrupted,
+      :unrecoverable_state,
+      :workflow_not_found,
+      :step_not_found,
+      :resource_deleted,
+      :account_closed
+    ]
+  end
+
+  @doc """
+  Verifica si un error es recuperable (corregible con intervención externa).
+
+  ## Ejemplo
+
+      iex> Retry.recoverable_error?(:missing_dni)
+      true
+
+      iex> Retry.recoverable_error?(:fraud_detected)
+      false
+  """
+  @spec recoverable_error?(term()) :: boolean()
+  def recoverable_error?(error) do
+    error_atom = extract_error_atom(error)
+    error_atom in recoverable_errors()
+  end
+
+  @doc """
+  Verifica si un error es permanente (requiere decisión humana para retry).
+
+  ## Ejemplo
+
+      iex> Retry.permanent_error?(:fraud_detected)
+      true
+
+      iex> Retry.permanent_error?(:missing_dni)
+      false  # Este es recoverable, no permanent
+
+      iex> Retry.permanent_error?({:fraud_detected, "Score de riesgo alto"})
       true
   """
   @spec permanent_error?(term()) :: boolean()
@@ -590,13 +693,169 @@ defmodule Beamflow.Engine.Retry do
   end
 
   @doc """
-  Clasifica un error como `:transient` o `:permanent`.
+  Verifica si un error es terminal (workflow debe archivarse).
 
-  ## Retorno
+  ## Ejemplo
 
-  - `:transient` - El error puede resolverse con reintentos
-  - `:permanent` - El error requiere intervención manual
-  - `:unknown` - No se puede clasificar, se trata como transitorio por defecto
+      iex> Retry.terminal_error?(:external_system_deprecated)
+      true
+
+      iex> Retry.terminal_error?(:timeout)
+      false
+  """
+  @spec terminal_error?(term()) :: boolean()
+  def terminal_error?(error) do
+    error_atom = extract_error_atom(error)
+    error_atom in terminal_errors()
+  end
+
+  @doc """
+  Verifica si un error permite retry automático.
+
+  Solo errores `:transient` permiten retry automático.
+  Los `:recoverable` requieren corrección + retry manual.
+  Los `:permanent` requieren confirmación explícita.
+  Los `:terminal` nunca se reintentan.
+
+  ## Ejemplo
+
+      iex> Retry.auto_retryable?(:timeout)
+      true
+
+      iex> Retry.auto_retryable?(:missing_dni)
+      false  # Requiere corrección manual
+  """
+  @spec auto_retryable?(term()) :: boolean()
+  def auto_retryable?(error) do
+    classify_error(error) == :transient
+  end
+
+  @doc """
+  Verifica si un error permite retry manual (después de corrección).
+
+  Errores `:transient`, `:recoverable` y `:unknown` permiten retry manual.
+  Errores `:permanent` permiten retry forzado (con confirmación).
+  Errores `:terminal` nunca permiten retry.
+
+  ## Ejemplo
+
+      iex> Retry.manual_retryable?(:missing_dni)
+      true
+
+      iex> Retry.manual_retryable?(:external_system_deprecated)
+      false
+  """
+  @spec manual_retryable?(term()) :: boolean()
+  def manual_retryable?(error) do
+    classify_error(error) not in [:terminal]
+  end
+
+  @doc """
+  Retorna información detallada sobre la clasificación de un error.
+
+  Útil para mostrar en la UI qué acciones están disponibles.
+
+  ## Ejemplo
+
+      iex> Retry.error_info(:missing_dni)
+      %{
+        class: :recoverable,
+        auto_retry: false,
+        manual_retry: true,
+        force_retry: false,
+        action: :wait_for_correction,
+        message: "Este error requiere corrección de datos. Una vez corregido, puede reintentarse manualmente."
+      }
+  """
+  @spec error_info(term()) :: map()
+  def error_info(error) do
+    class = classify_error(error)
+
+    case class do
+      :transient ->
+        %{
+          class: :transient,
+          auto_retry: true,
+          manual_retry: true,
+          force_retry: false,
+          action: :auto_retry,
+          message: "Error temporal. El sistema reintentará automáticamente.",
+          icon: "🔄",
+          color: "blue"
+        }
+
+      :recoverable ->
+        %{
+          class: :recoverable,
+          auto_retry: false,
+          manual_retry: true,
+          force_retry: false,
+          action: :wait_for_correction,
+          message: "Requiere corrección de datos. Una vez corregido, puede reintentarse.",
+          icon: "✏️",
+          color: "yellow"
+        }
+
+      :permanent ->
+        %{
+          class: :permanent,
+          auto_retry: false,
+          manual_retry: false,
+          force_retry: true,
+          action: :requires_decision,
+          message: "Requiere decisión humana. Solo un operador puede forzar el reintento.",
+          icon: "⚠️",
+          color: "orange"
+        }
+
+      :terminal ->
+        %{
+          class: :terminal,
+          auto_retry: false,
+          manual_retry: false,
+          force_retry: false,
+          action: :archive,
+          message: "Este workflow no puede continuar y será archivado.",
+          icon: "🚫",
+          color: "red"
+        }
+
+      :unknown ->
+        %{
+          class: :unknown,
+          auto_retry: true,
+          manual_retry: true,
+          force_retry: false,
+          action: :auto_retry,
+          message: "Error no clasificado. Se tratará como temporal.",
+          icon: "❓",
+          color: "gray"
+        }
+    end
+  end
+
+  @typedoc """
+  Categorías de clasificación de errores.
+
+  - `:transient` - Retry automático (timeout, service_unavailable)
+  - `:recoverable` - Espera corrección externa + retry manual (missing_dni, pending_approval)
+  - `:permanent` - Requiere decisión humana, solo retry forzado (fraud_detected, blacklisted)
+  - `:terminal` - Nunca reintentar, archivar (system_deprecated, workflow_cancelled)
+  - `:unknown` - No clasificado, se trata como transient por defecto
+  """
+  @type error_class :: :transient | :recoverable | :permanent | :terminal | :unknown
+
+  @doc """
+  Clasifica un error en una de las 4 categorías.
+
+  ## Categorías
+
+  | Categoría | Acción | Ejemplo |
+  |-----------|--------|---------|  
+  | `:transient` | Retry automático | timeout, rate_limited |
+  | `:recoverable` | Esperar corrección + retry manual | missing_dni, pending_approval |
+  | `:permanent` | Solo retry forzado con confirmación | fraud_detected, blacklisted |
+  | `:terminal` | Archivar, nunca reintentar | system_deprecated |
 
   ## Ejemplo
 
@@ -604,17 +863,25 @@ defmodule Beamflow.Engine.Retry do
       :transient
 
       iex> Retry.classify_error(:missing_dni)
+      :recoverable
+
+      iex> Retry.classify_error(:fraud_detected)
       :permanent
+
+      iex> Retry.classify_error(:external_system_deprecated)
+      :terminal
 
       iex> Retry.classify_error(:some_unknown_error)
       :unknown
   """
-  @spec classify_error(term()) :: :transient | :permanent | :unknown
+  @spec classify_error(term()) :: error_class()
   def classify_error(error) do
     error_atom = extract_error_atom(error)
 
     cond do
+      error_atom in terminal_errors() -> :terminal
       error_atom in permanent_errors() -> :permanent
+      error_atom in recoverable_errors() -> :recoverable
       error_atom in transient_errors() -> :transient
       true -> :unknown
     end

@@ -13,6 +13,8 @@ defmodule BeamflowWeb.WorkflowExplorerLive do
 
   use BeamflowWeb, :live_view
 
+  require Logger
+
   alias Beamflow.Storage.WorkflowStore
   alias Beamflow.Engine.WorkflowSupervisor
   alias Beamflow.Domains.Insurance.InsuranceWorkflow
@@ -227,36 +229,85 @@ defmodule BeamflowWeb.WorkflowExplorerLive do
 
     case WorkflowStore.get_workflow(id) do
       {:ok, workflow} ->
-        # Verificar si el error es permanente (no reintentable)
-        error_class = Retry.classify_error(workflow.error)
+        # Verificar clase de error
+        actual_class = Retry.classify_error(workflow.error)
 
-        if error_class == :permanent do
-          {:noreply,
-           put_flash_auto_hide(
-             socket,
-             :error,
-             "❌ Error permanente: #{format_error(workflow.error)}. Requiere corrección manual de los datos.",
-             7_000
-           )}
-        else
-          # Reiniciar el workflow con los mismos parámetros
-          case WorkflowSupervisor.start_workflow(
-                 workflow.workflow_module,
-                 id <> "-retry-#{:rand.uniform(999)}",
-                 workflow.workflow_state
-               ) do
-            {:ok, _pid} ->
-              Process.send_after(self(), {:refresh_for_new_workflow, id}, 100)
-              {:noreply, put_flash_auto_hide(socket, :info, "🔄 Reintento de #{id} iniciado")}
+        cond do
+          actual_class == :terminal ->
+            {:noreply,
+             put_flash_auto_hide(
+               socket,
+               :error,
+               "🚫 Error terminal: #{format_error(workflow.error)}. Este workflow será archivado y no puede reintentarse.",
+               7_000
+             )}
 
-            {:error, reason} ->
-              {:noreply,
-               put_flash_auto_hide(socket, :error, "Error al reintentar: #{inspect(reason)}", 5_000)}
-          end
+          actual_class == :permanent ->
+            {:noreply,
+             put_flash_auto_hide(
+               socket,
+               :warning,
+               "⚠️ Error permanente: #{format_error(workflow.error)}. Use 'Forzar Retry' si los datos fueron corregidos externamente.",
+               7_000
+             )}
+
+          actual_class == :recoverable ->
+            {:noreply,
+             put_flash_auto_hide(
+               socket,
+               :warning,
+               "✏️ Error recuperable: #{format_error(workflow.error)}. Corrija los datos y luego reintente manualmente.",
+               7_000
+             )}
+
+          true ->
+            # :transient o :unknown - permitir retry automático
+            do_retry_workflow(socket, workflow, id)
         end
 
       {:error, _reason} ->
         {:noreply, put_flash_auto_hide(socket, :error, "Workflow #{id} no encontrado", 5_000)}
+    end
+  end
+
+  @impl true
+  def handle_event("force_retry_workflow", %{"id" => id}, socket) do
+    # Handler para forzar retry de errores permanentes (con confirmación implícita del click)
+    case WorkflowStore.get_workflow(id) do
+      {:ok, workflow} ->
+        # Log para auditoría
+        Logger.warning(
+          "[FORCE_RETRY] Operador forzó retry de workflow #{id} con error permanente: #{inspect(workflow.error)}"
+        )
+
+        do_retry_workflow(socket, workflow, id, force: true)
+
+      {:error, _reason} ->
+        {:noreply, put_flash_auto_hide(socket, :error, "Workflow #{id} no encontrado", 5_000)}
+    end
+  end
+
+  defp do_retry_workflow(socket, workflow, id, opts \\ []) do
+    force? = Keyword.get(opts, :force, false)
+
+    case WorkflowSupervisor.start_workflow(
+           workflow.workflow_module,
+           id <> "-retry-#{:rand.uniform(999)}",
+           workflow.workflow_state
+         ) do
+      {:ok, _pid} ->
+        Process.send_after(self(), {:refresh_for_new_workflow, id}, 100)
+
+        message =
+          if force?,
+            do: "⚠️ Retry FORZADO de #{id} iniciado (error permanente)",
+            else: "🔄 Reintento de #{id} iniciado"
+
+        {:noreply, put_flash_auto_hide(socket, :info, message)}
+
+      {:error, reason} ->
+        {:noreply,
+         put_flash_auto_hide(socket, :error, "Error al reintentar: #{inspect(reason)}", 5_000)}
     end
   end
 
@@ -505,37 +556,44 @@ defmodule BeamflowWeb.WorkflowExplorerLive do
   defp retry_button(assigns) do
     alias Beamflow.Engine.Retry
 
-    error_class = Retry.classify_error(assigns.workflow.error)
-    is_permanent = error_class == :permanent
+    error_info = Retry.error_info(assigns.workflow.error)
 
     assigns =
       assigns
-      |> assign(:is_permanent, is_permanent)
-      |> assign(:error_class, error_class)
+      |> assign(:error_info, error_info)
 
     ~H"""
     <button
-      phx-click="retry_workflow"
+      phx-click={get_retry_action(@error_info)}
       phx-value-id={@workflow.id}
+      phx-value-error-class={@error_info.class}
       class={[
         "p-2 rounded transition",
-        if(@is_permanent,
-          do: "text-orange-400 hover:text-orange-300 hover:bg-orange-900/30 cursor-help",
-          else: "text-slate-400 hover:text-green-400 hover:bg-slate-700"
-        )
+        get_button_classes(@error_info)
       ]}
-      title={
-        if @is_permanent do
-          "⚠️ Error permanente: #{format_error(@workflow.error)} - Requiere corrección manual"
-        else
-          "🔄 Reintentar workflow"
-        end
-      }
+      title={get_button_title(@error_info, @workflow.error)}
+      disabled={@error_info.class == :terminal}
     >
-      <%= if @is_permanent, do: "⚠️", else: "🔄" %>
+      <%= @error_info.icon %>
     </button>
     """
   end
+
+  defp get_retry_action(%{class: :terminal}), do: nil
+  defp get_retry_action(%{class: :permanent}), do: "force_retry_workflow"
+  defp get_retry_action(_), do: "retry_workflow"
+
+  defp get_button_classes(%{class: :transient}), do: "text-blue-400 hover:text-blue-300 hover:bg-blue-900/30"
+  defp get_button_classes(%{class: :recoverable}), do: "text-yellow-400 hover:text-yellow-300 hover:bg-yellow-900/30"
+  defp get_button_classes(%{class: :permanent}), do: "text-orange-400 hover:text-orange-300 hover:bg-orange-900/30"
+  defp get_button_classes(%{class: :terminal}), do: "text-red-400 opacity-50 cursor-not-allowed"
+  defp get_button_classes(_), do: "text-slate-400 hover:text-green-400 hover:bg-slate-700"
+
+  defp get_button_title(%{class: :transient}, _error), do: "🔄 Reintentar automáticamente"
+  defp get_button_title(%{class: :recoverable}, error), do: "✏️ Error recuperable: #{format_error(error)} - Corregir datos y reintentar"
+  defp get_button_title(%{class: :permanent}, error), do: "⚠️ Error permanente: #{format_error(error)} - Requiere confirmación para reintentar"
+  defp get_button_title(%{class: :terminal}, error), do: "🚫 Error terminal: #{format_error(error)} - No se puede reintentar"
+  defp get_button_title(_, _error), do: "🔄 Reintentar workflow"
 
   attr :status, :atom, required: true
 
